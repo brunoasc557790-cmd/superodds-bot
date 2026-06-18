@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>SuperOdds — Pendentes</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+  :root {
+    --bg:      #0b0d10;
+    --s1:      #111418;
+    --s2:      #181c22;
+    --s3:      #1f252e;
+    --b0:      #262c38;
+    --green:   #00f590;
+    --gbg:     #032210;
+    --gbr:     #0a5c28;
+    --red:     #ff4d6a;
+    --rbg:     #200810;
+    --rbr:     #6b1525;
+    --amber:   #ffc94d;
+    --abg:     #1f1508;
+    --abr:     #6b4a08;
+    --blue:    #38c9ff;
+    --text:    #eaf0ff;
+    --t2:      #8892a8;
+    --t3:      #4a5068;
+    --mono:    'JetBrains Mono', monospace;
+  }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Outfit', 'Segoe UI', sans-serif;
+    font-size: 14px;
+    overscroll-behavior: none;
+  }
+
+  .header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--s1);
+    border-bottom: 1px solid var(--b0);
+    padding: 14px 16px 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .header-icon { font-size: 22px; }
+
+  .header-info { flex: 1; }
+  .header-title { font-size: 15px; font-weight: 700; color: var(--text); letter-spacing: -.2px; }
+  .header-sub { font-size: 11px; color: var(--t2); margin-top: 1px; }
+
+  .resultado-badge {
+    font-size: 11px;
+    font-family: var(--mono);
+    font-weight: 700;
+    padding: 3px 10px;
+    border-radius: 20px;
+    letter-spacing: .5px;
+  }
+  .badge-green { background: var(--gbg); border: 1px solid var(--gbr); color: var(--green); }
+  .badge-red   { background: var(--rbg); border: 1px solid var(--rbr); color: var(--red); }
+  .badge-void  { background: #0a1020; border: 1px solid #1a2540; color: var(--blue); }
+
+  .list { padding: 10px 12px 80px; display: flex; flex-direction: column; gap: 8px; }
+
+  .card {
+    background: var(--s2);
+    border: 1px solid var(--b0);
+    border-radius: 14px;
+    padding: 13px 14px;
+    cursor: pointer;
+    transition: background .12s, border-color .12s, transform .08s;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .card:active { transform: scale(.98); background: var(--s3); }
+
+  .card.selected-green { border-color: var(--gbr); background: var(--gbg); }
+  .card.selected-red   { border-color: var(--rbr); background: var(--rbg); }
+  .card.selected-void  { border-color: #1a2540; background: #0a1020; }
+
+  .card-top {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .card-emoji { font-size: 20px; flex-shrink: 0; margin-top: 1px; }
+  .card-ap {
+    flex: 1;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    line-height: 1.4;
+  }
+
+  .card-meta {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .meta-tag {
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--t2);
+    background: var(--s3);
+    border: 1px solid var(--b0);
+    border-radius: 6px;
+    padding: 2px 8px;
+  }
+  .meta-odd {
+    font-size: 13px;
+    font-family: var(--mono);
+    font-weight: 700;
+    color: var(--amber);
+  }
+  .meta-stake {
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--t2);
+    margin-left: auto;
+  }
+
+  .empty {
+    text-align: center;
+    color: var(--t3);
+    padding: 60px 20px;
+    font-size: 15px;
+    line-height: 1.6;
+  }
+  .empty-icon { font-size: 40px; margin-bottom: 12px; }
+
+  .footer {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 12px 16px;
+    background: var(--s1);
+    border-top: 1px solid var(--b0);
+  }
+
+  .btn-confirmar {
+    width: 100%;
+    padding: 14px;
+    border-radius: 12px;
+    border: none;
+    font-size: 15px;
+    font-weight: 700;
+    font-family: 'Outfit', sans-serif;
+    cursor: pointer;
+    transition: opacity .15s, transform .1s;
+    letter-spacing: .3px;
+  }
+  .btn-confirmar:active { transform: scale(.97); }
+  .btn-confirmar:disabled { opacity: .35; cursor: default; }
+  .btn-green { background: var(--green); color: #000; }
+  .btn-red   { background: var(--red); color: #fff; }
+  .btn-void  { background: var(--blue); color: #000; }
+
+  .loading {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 200px;
+    color: var(--t3);
+    font-size: 14px;
+    gap: 8px;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner {
+    width: 18px; height: 18px;
+    border: 2px solid var(--b0);
+    border-top-color: var(--green);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+
+  .toast {
+    position: fixed;
+    top: 70px;
+    left: 50%;
+    transform: translateX(-50%) translateY(-10px);
+    background: var(--s3);
+    border: 1px solid var(--b0);
+    border-radius: 10px;
+    padding: 10px 18px;
+    font-size: 13px;
+    color: var(--text);
+    opacity: 0;
+    transition: opacity .2s, transform .2s;
+    pointer-events: none;
+    z-index: 100;
+    white-space: nowrap;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<div class="header">
+  <div class="header-icon" id="h-icon">⏳</div>
+  <div class="header-info">
+    <div class="header-title">Apostas Pendentes</div>
+    <div class="header-sub" id="h-sub">carregando...</div>
+  </div>
+  <div class="resultado-badge" id="h-badge"></div>
+</div>
+
+<div class="list" id="list">
+  <div class="loading"><div class="spinner"></div> carregando...</div>
+</div>
+
+<div class="footer">
+  <button class="btn-confirmar" id="btn-confirmar" disabled>
+    Selecione uma aposta
+  </button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const tg = window.Telegram.WebApp;
+tg.expand();
+tg.disableVerticalSwipes?.();
+
+// lê parâmetros da URL: ?res=GREEN&token=...
+const params = new URLSearchParams(window.location.search);
+const RESULTADO = (params.get('res') || 'GREEN').toUpperCase();
+const TOKEN = params.get('token') || '';
+
+const EMOJI_ESPORTE = {
+  'Futebol': '⚽', 'Basquete': '🏀', 'Tênis': '🎾',
+  'MMA': '🥊', 'Vôlei': '🏐', 'E-sports': '🎮', 'Outros': '🎲',
+};
+
+const COR = { GREEN: 'green', RED: 'red', VOID: 'void' }[RESULTADO] || 'green';
+const EMOJI_RES = { GREEN: '🟢', RED: '🔴', VOID: '⚪' }[RESULTADO] || '🟢';
+
+// header
+document.getElementById('h-icon').textContent = EMOJI_RES;
+document.getElementById('h-badge').textContent = RESULTADO;
+document.getElementById('h-badge').className = `resultado-badge badge-${COR}`;
+
+// botão
+const btn = document.getElementById('btn-confirmar');
+btn.className = `btn-confirmar btn-${COR}`;
+
+let selectedId = null;
+
+function fmt(v) {
+  if (!v && v !== 0) return '—';
+  return 'R$ ' + parseFloat(v).toFixed(2).replace('.', ',');
+}
+
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2000);
+}
+
+function renderList(bets) {
+  const list = document.getElementById('list');
+  if (!bets || bets.length === 0) {
+    list.innerHTML = `
+      <div class="empty">
+        <div class="empty-icon">✅</div>
+        Nenhuma aposta pendente hoje!
+      </div>`;
+    return;
+  }
+
+  document.getElementById('h-sub').textContent = `${bets.length} pendente${bets.length !== 1 ? 's' : ''} hoje`;
+
+  list.innerHTML = bets.map(b => {
+    const emoji = EMOJI_ESPORTE[b.esp] || '🎲';
+    const odd = b.odd ?? '—';
+    const stake = b.stake ? fmt(b.stake) : null;
+    const casa = b.casa || '';
+    return `
+      <div class="card" data-id="${b.id}" onclick="selectCard(this, '${b.id}')">
+        <div class="card-top">
+          <div class="card-emoji">${emoji}</div>
+          <div class="card-ap">${b.ap || '—'}</div>
+        </div>
+        <div class="card-meta">
+          ${casa ? `<span class="meta-tag">${casa}</span>` : ''}
+          <span class="meta-odd">@${odd}</span>
+          ${stake ? `<span class="meta-stake">${stake}</span>` : ''}
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function selectCard(el, id) {
+  // desmarca anterior
+  document.querySelectorAll('.card').forEach(c => c.classList.remove(`selected-${COR}`));
+  // marca novo
+  el.classList.add(`selected-${COR}`);
+  selectedId = id;
+  btn.disabled = false;
+  btn.textContent = `Marcar como ${RESULTADO}`;
+}
+
+async function confirmar() {
+  if (!selectedId) return;
+  btn.disabled = true;
+  btn.textContent = 'Confirmando...';
+
+  try {
+    const r = await fetch(`/resolve?token=${TOKEN}&bet_id=${selectedId}&res=${RESULTADO}`);
+    if (!r.ok) throw new Error('Erro ' + r.status);
+    const data = await r.json();
+    toast(data.msg || '✓ Marcado!');
+    setTimeout(() => tg.close(), 1200);
+  } catch (e) {
+    toast('⚠ Erro ao confirmar');
+    btn.disabled = false;
+    btn.textContent = `Marcar como ${RESULTADO}`;
+  }
+}
+
+btn.addEventListener('click', confirmar);
+
+// carrega pendentes do servidor
+async function load() {
+  try {
+    const r = await fetch(`/pendentes?token=${TOKEN}`);
+    if (!r.ok) throw new Error('Erro ' + r.status);
+    const bets = await r.json();
+    renderList(bets);
+  } catch (e) {
+    document.getElementById('list').innerHTML = `
+      <div class="empty">
+        <div class="empty-icon">⚠️</div>
+        Erro ao carregar apostas.<br>Tente novamente.
+      </div>`;
+  }
+}
+
+load();
+</script>
+</body>
+</html>
