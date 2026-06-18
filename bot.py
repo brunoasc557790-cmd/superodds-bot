@@ -332,20 +332,20 @@ async def iniciar_resolucao(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Não tem nenhuma aposta pendente de hoje!")
         return
 
-    pendentes = pendentes[:15]  # limita a 15 pra não passar do tamanho do teclado
-
     cor = {"GREEN": "🟢", "RED": "🔴", "VOID": "⚪"}.get(resultado, "")
     n = len(pendentes)
 
-    # botão grande por aposta, com número + resumo curto — toque direto na linha certa
-    botoes = []
-    for i, (bet_id, b) in enumerate(pendentes, start=1):
-        texto_botao = f"{i}. {formatar_resumo_aposta(b)}"
-        botoes.append([InlineKeyboardButton(texto_botao, callback_data=f"resolve|{resultado}|{bet_id}")])
+    # abre o Mini App com a lista bonita
+    from telegram import WebAppInfo
+    webapp_url = f"{RENDER_EXTERNAL_URL}/webapp?res={resultado}&token={TELEGRAM_TOKEN}"
+    botao = [[InlineKeyboardButton(
+        f"{cor} Escolher aposta ({n} hoje)",
+        web_app=WebAppInfo(url=webapp_url)
+    )]]
 
     await update.message.reply_text(
-        f"{cor} *Marcar como {resultado}*\n_{n} pendente{'s' if n != 1 else ''} hoje:_",
-        reply_markup=InlineKeyboardMarkup(botoes),
+        f"{cor} *Marcar como {resultado}*\n_{n} pendente{'s' if n != 1 else ''} hoje — toque para escolher:_",
+        reply_markup=InlineKeyboardMarkup(botao),
         parse_mode="Markdown",
     )
 
@@ -434,9 +434,71 @@ async def run_bot():
     async def handle_health(request: web.Request) -> web.Response:
         return web.Response(text="SuperOdds Bot rodando!")
 
+    async def handle_webapp(request: web.Request) -> web.Response:
+        """Serve o HTML do Mini App."""
+        import os as _os
+        html_path = _os.path.join(_os.path.dirname(__file__), "webapp.html")
+        with open(html_path, "r", encoding="utf-8") as f:
+            html = f.read()
+        return web.Response(text=html, content_type="text/html")
+
+    async def handle_pendentes(request: web.Request) -> web.Response:
+        """API: retorna apostas pendentes de hoje em JSON."""
+        if request.rel_url.query.get("token") != TELEGRAM_TOKEN:
+            return web.Response(status=403, text="Forbidden")
+        hoje = datetime.now().strftime("%Y-%m-%d")
+        bets_col = db.collection("users").document(FIREBASE_UID).collection("bets")
+        docs = bets_col.where("res", "==", "PENDENTE").stream()
+        pendentes = []
+        for doc in docs:
+            d = doc.to_dict()
+            if d.get("dat") == hoje:
+                d["id"] = doc.id
+                pendentes.append(d)
+        pendentes.sort(key=lambda x: x.get("dat", ""), reverse=True)
+        return web.json_response(pendentes)
+
+    async def handle_resolve(request: web.Request) -> web.Response:
+        """API: resolve uma aposta e retorna o resultado com lucro/prejuízo."""
+        if request.rel_url.query.get("token") != TELEGRAM_TOKEN:
+            return web.Response(status=403, text="Forbidden")
+        bet_id = request.rel_url.query.get("bet_id")
+        resultado = request.rel_url.query.get("res", "").upper()
+        if not bet_id or resultado not in ("GREEN", "RED", "VOID"):
+            return web.Response(status=400, text="Parâmetros inválidos")
+        bets_col = db.collection("users").document(FIREBASE_UID).collection("bets")
+        doc = bets_col.document(bet_id).get()
+        b = doc.to_dict() if doc.exists else {}
+        resolver_aposta(bet_id, resultado)
+        # monta mensagem de confirmação para o chat
+        cor = {"GREEN": "🟢", "RED": "🔴", "VOID": "⚪"}.get(resultado, "")
+        resumo = formatar_resumo_aposta(b) if b else ""
+        msg = f"{cor} *{resultado}*\n{resumo}" if resumo else f"{cor} Aposta marcada como {resultado}!"
+        try:
+            stake = float(b.get("stake", 0))
+            odd = float(b.get("odd", 0))
+            if resultado == "GREEN":
+                lucro = stake * (odd - 1)
+                msg += f"\n💰 Lucro: +R$ {lucro:.2f}"
+            elif resultado == "RED":
+                msg += f"\n💸 Prejuízo: -R$ {stake:.2f}"
+            elif resultado == "VOID":
+                msg += f"\n↩️ Stake devolvida: R$ {stake:.2f}"
+        except (TypeError, ValueError):
+            pass
+        # envia confirmação no chat do Telegram
+        try:
+            await app.bot.send_message(ALLOWED_CHAT_ID, msg, parse_mode="Markdown")
+        except Exception:
+            pass
+        return web.json_response({"ok": True, "msg": f"{cor} {resultado}!"})
+
     web_app = web.Application()
     web_app.router.add_post(webhook_path, handle_webhook)
     web_app.router.add_get("/", handle_health)
+    web_app.router.add_get("/webapp", handle_webapp)
+    web_app.router.add_get("/pendentes", handle_pendentes)
+    web_app.router.add_get("/resolve", handle_resolve)
 
     runner = web.AppRunner(web_app)
 
