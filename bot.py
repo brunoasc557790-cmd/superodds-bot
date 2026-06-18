@@ -330,18 +330,29 @@ async def iniciar_resolucao(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Não tem nenhuma aposta pendente de hoje!")
         return
 
-    botoes = []
-    for bet_id, b in pendentes[:15]:  # limita a 15 pra não passar do tamanho do teclado
-        texto_botao = formatar_resumo_aposta(b)
-        if len(texto_botao) > 64:
-            texto_botao = texto_botao[:61] + "..."
-        botoes.append([InlineKeyboardButton(texto_botao, callback_data=f"resolve|{resultado}|{bet_id}")])
+    pendentes = pendentes[:15]  # limita a 15 pra não passar do tamanho do teclado
 
     cor = {"GREEN": "🟢", "RED": "🔴", "VOID": "⚪"}.get(resultado, "")
     n = len(pendentes)
+
+    linhas = [f"{cor} *Marcar como {resultado}*", f"_{n} pendente{'s' if n != 1 else ''} hoje:_", ""]
+    for i, (bet_id, b) in enumerate(pendentes, start=1):
+        linhas.append(f"{i}. {formatar_resumo_aposta(b)}")
+    texto = "\n".join(linhas)
+
+    # botões compactos, só com o número, lado a lado em linhas de até 5
+    botoes = []
+    linha_atual = []
+    for i, (bet_id, b) in enumerate(pendentes, start=1):
+        linha_atual.append(InlineKeyboardButton(str(i), callback_data=f"resolve|{resultado}|{bet_id}"))
+        if len(linha_atual) == 5:
+            botoes.append(linha_atual)
+            linha_atual = []
+    if linha_atual:
+        botoes.append(linha_atual)
+
     await update.message.reply_text(
-        f"{cor} *Marcar como {resultado}*\n"
-        f"_{n} pendente{'s' if n != 1 else ''} hoje — toque na aposta:_",
+        texto,
         reply_markup=InlineKeyboardMarkup(botoes),
         parse_mode="Markdown",
     )
