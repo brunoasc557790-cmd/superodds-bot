@@ -68,7 +68,7 @@ gemini_model = genai.GenerativeModel("gemini-2.5-flash")
 SPORTS = ['Futebol', 'Basquete', 'Tênis', 'MMA', 'Vôlei', 'E-sports', 'Outros']
 
 # estados da conversa
-AGUARDANDO_VALOR, AGUARDANDO_CASA = range(2)
+AGUARDANDO_VALOR, AGUARDANDO_CASA, AGUARDANDO_DATA = range(3)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -86,30 +86,81 @@ def extrair_dados_print(image_bytes: bytes, media_type: str) -> dict:
 
     prompt = f"""Analise este print de bilhete de aposta esportiva e extraia os dados em JSON.
 
-Responda APENAS com um JSON válido, sem nenhum texto antes ou depois, no formato:
+Se houver múltiplas seleções no bilhete (aposta múltipla), trate como UMA única aposta combinada e descreva todas as seleções juntas no campo "jogo_ou_aposta", usando a odd TOTAL da combinação.
+
+Responda APENAS com um único objeto JSON válido (nunca uma lista), sem nenhum texto antes ou depois, exatamente neste formato:
 {{
   "esporte": "um destes: {', '.join(SPORTS)}",
   "jogo_ou_aposta": "descrição curta do jogo/mercado, ex: 'Flamengo x Vasco - Over 2.5 gols'",
   "odd": 1.85
 }}
 
-Se não conseguir identificar algum campo com confiança, use null nesse campo."""
+Se não conseguir identificar algum campo com confiança, use null nesse campo. A resposta deve ser um objeto único {{...}}, nunca uma lista [...]."""
 
     image_part = {"mime_type": media_type, "data": image_bytes}
     resp = gemini_model.generate_content([prompt, image_part])
 
     text = resp.text.strip()
     text = text.replace("```json", "").replace("```", "").strip()
-    return json.loads(text)
+    parsed = json.loads(text)
+
+    # defesa extra: se o modelo devolver uma lista (ex: várias seleções
+    # separadas), usa o primeiro item e combina a descrição das demais
+    if isinstance(parsed, list):
+        if not parsed:
+            return {"esporte": None, "jogo_ou_aposta": None, "odd": None}
+        primeiro = parsed[0]
+        if len(parsed) > 1:
+            descricoes = [item.get("jogo_ou_aposta", "") for item in parsed if isinstance(item, dict)]
+            primeiro["jogo_ou_aposta"] = " + ".join(d for d in descricoes if d)
+        parsed = primeiro
+
+    if not isinstance(parsed, dict):
+        return {"esporte": None, "jogo_ou_aposta": None, "odd": None}
+
+    return parsed
+
+
+# ══════════════════════════════════════════════════════════════════
+# PARSING FLEXÍVEL DE DATA — aceita "hoje", "ontem", ou dd/mm[/aaaa]
+# ══════════════════════════════════════════════════════════════════
+def parsear_data(texto: str) -> str | None:
+    """Retorna a data no formato YYYY-MM-DD, ou None se não conseguir entender."""
+    texto = texto.strip().lower()
+    hoje = datetime.now()
+
+    if texto in ("hoje", "h"):
+        return hoje.strftime("%Y-%m-%d")
+    if texto in ("ontem", "o"):
+        from datetime import timedelta
+        return (hoje - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # aceita dd/mm ou dd/mm/aaaa ou dd-mm ou dd-mm-aaaa
+    for sep in ("/", "-"):
+        if sep in texto:
+            partes = texto.split(sep)
+            if len(partes) == 2:
+                dia, mes = partes
+                ano = hoje.year
+            elif len(partes) == 3:
+                dia, mes, ano = partes
+                ano = int(ano) if len(ano) == 4 else 2000 + int(ano)
+            else:
+                continue
+            try:
+                d = datetime(int(ano), int(mes), int(dia))
+                return d.strftime("%Y-%m-%d")
+            except ValueError:
+                return None
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════
 # FIRESTORE — grava a aposta no mesmo formato do dashboard
 # ══════════════════════════════════════════════════════════════════
-def gravar_aposta(esp: str, ap: str, odd: float, stake: float, casa: str):
-    hoje = datetime.now().strftime("%Y-%m-%d")
+def gravar_aposta(esp: str, ap: str, odd: float, stake: float, casa: str, dat: str):
     bet = {
-        "dat": hoje,
+        "dat": dat,
         "esp": esp or "Outros",
         "casa": casa,
         "ap": ap,
@@ -192,20 +243,42 @@ async def receber_casa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not autorizado(update):
         return ConversationHandler.END
 
-    casa = update.message.text.strip()
+    context.user_data["casa"] = update.message.text.strip()
+
+    hoje_fmt = datetime.now().strftime("%d/%m")
+    await update.message.reply_text(
+        f"📅 Qual o dia da aposta?\n"
+        f"Manda 'hoje', 'ontem', ou a data (ex: {hoje_fmt})"
+    )
+    return AGUARDANDO_DATA
+
+
+async def receber_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not autorizado(update):
+        return ConversationHandler.END
+
+    dat = parsear_data(update.message.text)
+    if not dat:
+        await update.message.reply_text(
+            "⚠ Não entendi essa data. Manda 'hoje', 'ontem', ou no formato dd/mm (ex: 17/06)"
+        )
+        return AGUARDANDO_DATA
+
     d = context.user_data
+    d["dat"] = dat
 
     try:
-        gravar_aposta(d["esp"], d["ap"], d["odd"], d["stake"], casa)
+        gravar_aposta(d["esp"], d["ap"], d["odd"], d["stake"], d["casa"], d["dat"])
     except Exception as e:
         log.exception("Erro ao gravar no Firestore")
         await update.message.reply_text(f"⚠ Erro ao salvar no dashboard: {e}")
         return ConversationHandler.END
 
+    data_fmt = datetime.strptime(dat, "%Y-%m-%d").strftime("%d/%m/%Y")
     await update.message.reply_text(
         f"🎉 Aposta cadastrada como PENDENTE!\n\n"
         f"🏅 {d['esp']}\n🎯 {d['ap']}\n📈 Odd {d['odd']}\n"
-        f"💰 R$ {d['stake']:.2f}\n🏦 {casa}\n\n"
+        f"💰 R$ {d['stake']:.2f}\n🏦 {d['casa']}\n📅 {data_fmt}\n\n"
         f"Resolve ela (Green/Red/Void) direto no dashboard quando o jogo acabar."
     )
     context.user_data.clear()
@@ -237,6 +310,7 @@ def main():
         states={
             AGUARDANDO_VALOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_valor)],
             AGUARDANDO_CASA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_casa)],
+            AGUARDANDO_DATA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data)],
         },
         fallbacks=[CommandHandler("cancelar", cancelar)],
     )
