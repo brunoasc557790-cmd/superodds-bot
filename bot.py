@@ -280,9 +280,13 @@ async def mensagem_nao_reconhecida(update: Update, context: ContextTypes.DEFAULT
 
 
 # ══════════════════════════════════════════════════════════════════
-# MAIN
+# MAIN — servidor webhook manual com aiohttp (evita o start_webhook()
+# interno da biblioteca, que tem um bug de incompatibilidade com
+# versões recentes do Python no ambiente do Render)
 # ══════════════════════════════════════════════════════════════════
 async def run_bot():
+    from aiohttp import web
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     conv = ConversationHandler(
@@ -300,29 +304,45 @@ async def run_bot():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, mensagem_nao_reconhecida))
 
     port = int(os.environ.get("PORT", 10000))
-    webhook_path = TELEGRAM_TOKEN  # usa o próprio token como "segredo" da URL, difícil de adivinhar
-    webhook_url = f"{RENDER_EXTERNAL_URL}/{webhook_path}"
+    webhook_path = "/" + TELEGRAM_TOKEN  # usa o próprio token como "segredo" da URL
+    webhook_url = f"{RENDER_EXTERNAL_URL}{webhook_path}"
 
-    log.info(f"Bot iniciado via webhook em {webhook_url}")
+    async def handle_webhook(request: web.Request) -> web.Response:
+        data = await request.json()
+        update = Update.de_json(data, app.bot)
+        await app.process_update(update)
+        return web.Response()
+
+    async def handle_health(request: web.Request) -> web.Response:
+        return web.Response(text="SuperOdds Bot rodando!")
+
+    web_app = web.Application()
+    web_app.router.add_post(webhook_path, handle_webhook)
+    web_app.router.add_get("/", handle_health)
+
+    runner = web.AppRunner(web_app)
 
     async with app:
         await app.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
         await app.start()
-        await app.updater.start_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=webhook_path,
-        )
+
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+
+        log.info(f"Bot iniciado via webhook em {webhook_url}")
+
         import asyncio
         try:
             await asyncio.Event().wait()  # mantém o processo rodando pra sempre
         finally:
-            await app.updater.stop()
+            await runner.cleanup()
             await app.stop()
 
 
 if __name__ == "__main__":
     import asyncio
     asyncio.run(run_bot())
+
 
 
