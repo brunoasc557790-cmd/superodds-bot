@@ -152,11 +152,17 @@ def gravar_aposta(esp: str, ap: str, odd: float, stake: float, casa: str, dat: s
     db.collection("users").document(FIREBASE_UID).collection("bets").add(bet)
 
 
-def buscar_pendentes():
-    """Retorna lista de (id, dados) das apostas pendentes, mais recentes primeiro."""
+def buscar_pendentes(apenas_hoje: bool = True):
+    """Retorna lista de (id, dados) das apostas pendentes, mais recentes primeiro.
+    Por padrão, filtra só as de hoje (mesma data local do servidor)."""
     bets_col = db.collection("users").document(FIREBASE_UID).collection("bets")
     docs = bets_col.where("res", "==", "PENDENTE").stream()
     pendentes = [(doc.id, doc.to_dict()) for doc in docs]
+
+    if apenas_hoje:
+        hoje = datetime.now().strftime("%Y-%m-%d")
+        pendentes = [(bid, b) for bid, b in pendentes if b.get("dat") == hoje]
+
     # ordena pela data da aposta, mais recente primeiro (fallback se não tiver "dat")
     pendentes.sort(key=lambda x: x[1].get("dat", ""), reverse=True)
     return pendentes
@@ -297,13 +303,19 @@ async def mensagem_nao_reconhecida(update: Update, context: ContextTypes.DEFAULT
 # ══════════════════════════════════════════════════════════════════
 # RESOLVER PENDENTES POR TEXTO — "green", "red" ou "void"
 # ══════════════════════════════════════════════════════════════════
+EMOJI_ESPORTE = {
+    "Futebol": "⚽", "Basquete": "🏀", "Tênis": "🎾",
+    "MMA": "🥊", "Vôlei": "🏐", "E-sports": "🎮", "Outros": "🎲",
+}
+
+
 def formatar_resumo_aposta(b: dict) -> str:
-    data_fmt = b.get("dat", "")
-    try:
-        data_fmt = datetime.strptime(b["dat"], "%Y-%m-%d").strftime("%d/%m")
-    except Exception:
-        pass
-    return f"{b.get('esp','—')} · {b.get('ap','—')} (odd {b.get('odd','—')}) · {data_fmt}"
+    emoji = EMOJI_ESPORTE.get(b.get("esp"), "🎲")
+    ap = b.get("ap", "—")
+    odd = b.get("odd", "—")
+    casa = b.get("casa", "")
+    casa_str = f" · {casa}" if casa else ""
+    return f"{emoji} {ap} (@{odd}){casa_str}"
 
 
 async def iniciar_resolucao(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -315,20 +327,23 @@ async def iniciar_resolucao(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     pendentes = buscar_pendentes()
     if not pendentes:
-        await update.message.reply_text("✅ Não tem nenhuma aposta pendente agora!")
+        await update.message.reply_text("✅ Não tem nenhuma aposta pendente de hoje!")
         return
 
     botoes = []
     for bet_id, b in pendentes[:15]:  # limita a 15 pra não passar do tamanho do teclado
         texto_botao = formatar_resumo_aposta(b)
-        if len(texto_botao) > 60:
-            texto_botao = texto_botao[:57] + "..."
+        if len(texto_botao) > 64:
+            texto_botao = texto_botao[:61] + "..."
         botoes.append([InlineKeyboardButton(texto_botao, callback_data=f"resolve|{resultado}|{bet_id}")])
 
-    emoji = {"GREEN": "✅", "RED": "❌", "VOID": "⚪"}.get(resultado, "")
+    cor = {"GREEN": "🟢", "RED": "🔴", "VOID": "⚪"}.get(resultado, "")
+    n = len(pendentes)
     await update.message.reply_text(
-        f"{emoji} Qual aposta marcar como {resultado}?",
-        reply_markup=InlineKeyboardMarkup(botoes)
+        f"{cor} *Marcar como {resultado}*\n"
+        f"_{n} pendente{'s' if n != 1 else ''} hoje — toque na aposta:_",
+        reply_markup=InlineKeyboardMarkup(botoes),
+        parse_mode="Markdown",
     )
 
 
@@ -342,6 +357,10 @@ async def callback_resolver(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _, resultado, bet_id = query.data.split("|")
 
+    bets_col = db.collection("users").document(FIREBASE_UID).collection("bets")
+    doc = bets_col.document(bet_id).get()
+    b = doc.to_dict() if doc.exists else {}
+
     try:
         resolver_aposta(bet_id, resultado)
     except Exception as e:
@@ -349,8 +368,26 @@ async def callback_resolver(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"⚠ Erro ao marcar a aposta: {e}")
         return
 
-    emoji = {"GREEN": "✅", "RED": "❌", "VOID": "⚪"}.get(resultado, "")
-    await query.edit_message_text(f"{emoji} Aposta marcada como {resultado}!")
+    cor = {"GREEN": "🟢", "RED": "🔴", "VOID": "⚪"}.get(resultado, "")
+    resumo = formatar_resumo_aposta(b) if b else ""
+
+    texto = f"{cor} *{resultado}*\n{resumo}" if resumo else f"{cor} Aposta marcada como {resultado}!"
+
+    # calcula o retorno/lucro pra mostrar na confirmação, quando possível
+    try:
+        stake = float(b.get("stake", 0))
+        odd = float(b.get("odd", 0))
+        if resultado == "GREEN":
+            lucro = stake * (odd - 1)
+            texto += f"\n💰 Lucro: +R$ {lucro:.2f}"
+        elif resultado == "RED":
+            texto += f"\n💸 Prejuízo: -R$ {stake:.2f}"
+        elif resultado == "VOID":
+            texto += f"\n↩️ Stake devolvida: R$ {stake:.2f}"
+    except (TypeError, ValueError):
+        pass
+
+    await query.edit_message_text(texto, parse_mode="Markdown")
 
 
 # ══════════════════════════════════════════════════════════════════
