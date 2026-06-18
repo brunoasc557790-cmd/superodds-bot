@@ -7,7 +7,9 @@ import os
 import json
 import logging
 import base64
+import threading
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from telegram import Update
 from telegram.ext import (
@@ -21,6 +23,29 @@ from firebase_admin import credentials, firestore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
+
+# ══════════════════════════════════════════════════════════════════
+# SERVIDOR HTTP "FAKE" — só pra satisfazer o health check do Render.
+# O Render (Web Service) espera algo respondendo numa porta HTTP;
+# como o bot só conversa com o Telegram via polling, sem isso o
+# Render entende que o serviço travou e reinicia sozinho.
+# ══════════════════════════════════════════════════════════════════
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"SuperOdds Bot rodando!")
+
+    def log_message(self, format, *args):
+        pass  # silencia o log padrão do http.server pra não poluir os logs do bot
+
+
+def start_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    log.info(f"Servidor de health check rodando na porta {port}")
+    server.serve_forever()
 
 # ══════════════════════════════════════════════════════════════════
 # CONFIGURAÇÃO — lida de variáveis de ambiente (configuradas no Render)
@@ -239,4 +264,8 @@ if __name__ == "__main__":
         asyncio.get_event_loop()
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
+
+    # inicia o servidor HTTP fake numa thread separada, em paralelo ao bot
+    threading.Thread(target=start_health_server, daemon=True).start()
+
     main()
