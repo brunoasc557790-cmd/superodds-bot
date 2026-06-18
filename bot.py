@@ -17,7 +17,7 @@ from telegram.ext import (
     ConversationHandler, filters
 )
 
-import anthropic
+import google.generativeai as genai
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -51,7 +51,7 @@ def start_health_server():
 # CONFIGURAÇÃO — lida de variáveis de ambiente (configuradas no Render)
 # ══════════════════════════════════════════════════════════════════
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 ALLOWED_CHAT_ID = int(os.environ["ALLOWED_CHAT_ID"])     # seu chat id pessoal — só você usa o bot
 FIREBASE_UID = os.environ["FIREBASE_UID"]                 # seu UID do Google no Firebase
 FIREBASE_CREDENTIALS_JSON = os.environ["FIREBASE_CREDENTIALS_JSON"]  # conteúdo do service-account.json
@@ -62,7 +62,8 @@ cred = credentials.Certificate(cred_dict)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
+gemini_model = genai.GenerativeModel("gemini-2.5-flash")
 
 SPORTS = ['Futebol', 'Basquete', 'Tênis', 'MMA', 'Vôlei', 'E-sports', 'Outros']
 
@@ -78,11 +79,10 @@ def autorizado(update: Update) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════
-# LEITURA DO PRINT VIA CLAUDE (visão)
+# LEITURA DO PRINT VIA GEMINI (visão, gratuito)
 # ══════════════════════════════════════════════════════════════════
 def extrair_dados_print(image_bytes: bytes, media_type: str) -> dict:
-    """Manda o print pro Claude e pede pra extrair os dados estruturados da aposta."""
-    img_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+    """Manda o print pro Gemini e pede pra extrair os dados estruturados da aposta."""
 
     prompt = f"""Analise este print de bilhete de aposta esportiva e extraia os dados em JSON.
 
@@ -95,19 +95,10 @@ Responda APENAS com um JSON válido, sem nenhum texto antes ou depois, no format
 
 Se não conseguir identificar algum campo com confiança, use null nesse campo."""
 
-    resp = claude.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=500,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": img_b64}},
-                {"type": "text", "text": prompt}
-            ]
-        }]
-    )
+    image_part = {"mime_type": media_type, "data": image_bytes}
+    resp = gemini_model.generate_content([prompt, image_part])
 
-    text = resp.content[0].text.strip()
+    text = resp.text.strip()
     text = text.replace("```json", "").replace("```", "").strip()
     return json.loads(text)
 
