@@ -282,7 +282,7 @@ async def mensagem_nao_reconhecida(update: Update, context: ContextTypes.DEFAULT
 # ══════════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════════
-def main():
+async def run_bot():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     conv = ConversationHandler(
@@ -304,20 +304,25 @@ def main():
     webhook_url = f"{RENDER_EXTERNAL_URL}/{webhook_path}"
 
     log.info(f"Bot iniciado via webhook em {webhook_url}")
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=webhook_path,
-        webhook_url=webhook_url,
-        allowed_updates=Update.ALL_TYPES,
-    )
+
+    async with app:
+        await app.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
+        await app.start()
+        await app.updater.start_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=webhook_path,
+        )
+        import asyncio
+        try:
+            await asyncio.Event().wait()  # mantém o processo rodando pra sempre
+        finally:
+            await app.updater.stop()
+            await app.stop()
 
 
 if __name__ == "__main__":
     import asyncio
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
+    asyncio.run(run_bot())
 
-    main()
+
