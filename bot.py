@@ -440,7 +440,9 @@ async def run_bot():
         html_path = _os.path.join(_os.path.dirname(__file__), "webapp.html")
         with open(html_path, "r", encoding="utf-8") as f:
             html = f.read()
-        return web.Response(text=html, content_type="text/html")
+        return web.Response(text=html, content_type="text/html", headers={
+            "Access-Control-Allow-Origin": "*",
+        })
 
     async def handle_pendentes(request: web.Request) -> web.Response:
         """API: retorna apostas pendentes de hoje em JSON."""
@@ -454,9 +456,11 @@ async def run_bot():
             d = doc.to_dict()
             if d.get("dat") == hoje:
                 d["id"] = doc.id
+                # remove campos não serializáveis (como SERVER_TIMESTAMP)
+                d.pop("createdAt", None)
                 pendentes.append(d)
         pendentes.sort(key=lambda x: x.get("dat", ""), reverse=True)
-        return web.json_response(pendentes)
+        return web.json_response(pendentes, headers={"Access-Control-Allow-Origin": "*"})
 
     async def handle_resolve(request: web.Request) -> web.Response:
         """API: resolve uma aposta e retorna o resultado com lucro/prejuízo."""
@@ -491,7 +495,9 @@ async def run_bot():
             await app.bot.send_message(ALLOWED_CHAT_ID, msg, parse_mode="Markdown")
         except Exception:
             pass
-        return web.json_response({"ok": True, "msg": f"{cor} {resultado}!"})
+        return web.json_response({"ok": True, "msg": f"{cor} {resultado}!"}, headers={
+            "Access-Control-Allow-Origin": "*",
+        })
 
     web_app = web.Application()
     web_app.router.add_post(webhook_path, handle_webhook)
