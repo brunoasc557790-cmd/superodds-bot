@@ -13,10 +13,10 @@ import json
 import logging
 from datetime import datetime
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes,
-    ConversationHandler, filters
+    ConversationHandler, CallbackQueryHandler, filters
 )
 
 import google.generativeai as genai
@@ -152,6 +152,21 @@ def gravar_aposta(esp: str, ap: str, odd: float, stake: float, casa: str, dat: s
     db.collection("users").document(FIREBASE_UID).collection("bets").add(bet)
 
 
+def buscar_pendentes():
+    """Retorna lista de (id, dados) das apostas pendentes, mais recentes primeiro."""
+    bets_col = db.collection("users").document(FIREBASE_UID).collection("bets")
+    docs = bets_col.where("res", "==", "PENDENTE").stream()
+    pendentes = [(doc.id, doc.to_dict()) for doc in docs]
+    # ordena pela data da aposta, mais recente primeiro (fallback se não tiver "dat")
+    pendentes.sort(key=lambda x: x[1].get("dat", ""), reverse=True)
+    return pendentes
+
+
+def resolver_aposta(bet_id: str, resultado: str):
+    bets_col = db.collection("users").document(FIREBASE_UID).collection("bets")
+    bets_col.document(bet_id).update({"res": resultado})
+
+
 # ══════════════════════════════════════════════════════════════════
 # HANDLERS DO TELEGRAM
 # ══════════════════════════════════════════════════════════════════
@@ -280,6 +295,65 @@ async def mensagem_nao_reconhecida(update: Update, context: ContextTypes.DEFAULT
 
 
 # ══════════════════════════════════════════════════════════════════
+# RESOLVER PENDENTES POR TEXTO — "green", "red" ou "void"
+# ══════════════════════════════════════════════════════════════════
+def formatar_resumo_aposta(b: dict) -> str:
+    data_fmt = b.get("dat", "")
+    try:
+        data_fmt = datetime.strptime(b["dat"], "%Y-%m-%d").strftime("%d/%m")
+    except Exception:
+        pass
+    return f"{b.get('esp','—')} · {b.get('ap','—')} (odd {b.get('odd','—')}) · {data_fmt}"
+
+
+async def iniciar_resolucao(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Disparado quando o usuário manda 'green', 'red' ou 'void' como texto."""
+    if not autorizado(update):
+        return
+
+    resultado = update.message.text.strip().upper()
+
+    pendentes = buscar_pendentes()
+    if not pendentes:
+        await update.message.reply_text("✅ Não tem nenhuma aposta pendente agora!")
+        return
+
+    botoes = []
+    for bet_id, b in pendentes[:15]:  # limita a 15 pra não passar do tamanho do teclado
+        texto_botao = formatar_resumo_aposta(b)
+        if len(texto_botao) > 60:
+            texto_botao = texto_botao[:57] + "..."
+        botoes.append([InlineKeyboardButton(texto_botao, callback_data=f"resolve|{resultado}|{bet_id}")])
+
+    emoji = {"GREEN": "✅", "RED": "❌", "VOID": "⚪"}.get(resultado, "")
+    await update.message.reply_text(
+        f"{emoji} Qual aposta marcar como {resultado}?",
+        reply_markup=InlineKeyboardMarkup(botoes)
+    )
+
+
+async def callback_resolver(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Disparado quando o usuário clica num dos botões de aposta pendente."""
+    query = update.callback_query
+    if query.message.chat.id != ALLOWED_CHAT_ID:
+        return
+
+    await query.answer()
+
+    _, resultado, bet_id = query.data.split("|")
+
+    try:
+        resolver_aposta(bet_id, resultado)
+    except Exception as e:
+        log.exception("Erro ao resolver aposta")
+        await query.edit_message_text(f"⚠ Erro ao marcar a aposta: {e}")
+        return
+
+    emoji = {"GREEN": "✅", "RED": "❌", "VOID": "⚪"}.get(resultado, "")
+    await query.edit_message_text(f"{emoji} Aposta marcada como {resultado}!")
+
+
+# ══════════════════════════════════════════════════════════════════
 # MAIN — servidor webhook manual com aiohttp (evita o start_webhook()
 # interno da biblioteca, que tem um bug de incompatibilidade com
 # versões recentes do Python no ambiente do Render)
@@ -301,6 +375,10 @@ async def run_bot():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv)
+    app.add_handler(MessageHandler(
+        filters.Regex(r"(?i)^(green|red|void)$"), iniciar_resolucao
+    ))
+    app.add_handler(CallbackQueryHandler(callback_resolver, pattern=r"^resolve\|"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, mensagem_nao_reconhecida))
 
     port = int(os.environ.get("PORT", 10000))
