@@ -320,31 +320,23 @@ def formatar_resumo_aposta(b: dict, max_ap: int = 28) -> str:
     return f"{emoji} {ap}{casa_str} @{odd}"
 
 
-async def iniciar_resolucao(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Disparado quando o usuário manda 'green', 'red' ou 'void' como texto."""
+async def cmd_resolver(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Abre o Mini App para resolver apostas pendentes de hoje."""
     if not autorizado(update):
         return
-
-    resultado = update.message.text.strip().upper()
-
     pendentes = buscar_pendentes()
-    if not pendentes:
-        await update.message.reply_text("✅ Não tem nenhuma aposta pendente de hoje!")
-        return
-
-    cor = {"GREEN": "🟢", "RED": "🔴", "VOID": "⚪"}.get(resultado, "")
     n = len(pendentes)
-
-    # abre o Mini App com a lista bonita
+    if not n:
+        await update.message.reply_text("✅ Nenhuma aposta pendente hoje!")
+        return
     from telegram import WebAppInfo
-    webapp_url = f"{RENDER_EXTERNAL_URL}/webapp?res={resultado}&token={TELEGRAM_TOKEN}"
+    webapp_url = f"{RENDER_EXTERNAL_URL}/webapp?token={TELEGRAM_TOKEN}"
     botao = [[InlineKeyboardButton(
-        f"{cor} Escolher aposta ({n} hoje)",
+        f"⚡ Resolver apostas ({n} hoje)",
         web_app=WebAppInfo(url=webapp_url)
     )]]
-
     await update.message.reply_text(
-        f"{cor} *Marcar como {resultado}*\n_{n} pendente{'s' if n != 1 else ''} hoje — toque para escolher:_",
+        f"📋 *{n} aposta{'s' if n!=1 else ''} pendente{'s' if n!=1 else ''} hoje*\nAbra o menu para resolver:",
         reply_markup=InlineKeyboardMarkup(botao),
         parse_mode="Markdown",
     )
@@ -414,10 +406,8 @@ async def run_bot():
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("resolver", cmd_resolver))
     app.add_handler(conv)
-    app.add_handler(MessageHandler(
-        filters.Regex(r"(?i)^(green|red|void)$"), iniciar_resolucao
-    ))
     app.add_handler(CallbackQueryHandler(callback_resolver, pattern=r"^resolve\|"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, mensagem_nao_reconhecida))
 
@@ -499,12 +489,52 @@ async def run_bot():
             "Access-Control-Allow-Origin": "*",
         })
 
+    async def handle_resolve_multi(request: web.Request) -> web.Response:
+        """API: resolve múltiplas apostas de uma vez."""
+        if request.rel_url.query.get("token") != TELEGRAM_TOKEN:
+            return web.Response(status=403, text="Forbidden")
+        ids_str = request.rel_url.query.get("ids", "")
+        resultado = request.rel_url.query.get("res", "").upper()
+        if not ids_str or resultado not in ("GREEN", "RED", "VOID"):
+            return web.Response(status=400, text="Parâmetros inválidos")
+        ids = [i.strip() for i in ids_str.split(",") if i.strip()]
+        bets_col = db.collection("users").document(FIREBASE_UID).collection("bets")
+        total_lucro = 0.0
+        cor = {"GREEN": "🟢", "RED": "🔴", "VOID": "⚪"}.get(resultado, "")
+        for bet_id in ids:
+            doc = bets_col.document(bet_id).get()
+            b = doc.to_dict() if doc.exists else {}
+            resolver_aposta(bet_id, resultado)
+            try:
+                stake = float(b.get("stake", 0))
+                odd = float(b.get("odd", 0))
+                if resultado == "GREEN": total_lucro += stake * (odd - 1)
+                elif resultado == "RED": total_lucro -= stake
+            except (TypeError, ValueError):
+                pass
+        # monta mensagem de confirmação
+        n = len(ids)
+        if resultado == "GREEN":
+            msg = f"🟢 *{n} aposta{'s' if n>1 else ''} marcada{'s' if n>1 else ''} como GREEN*\n💰 Lucro total: +R$ {total_lucro:.2f}"
+        elif resultado == "RED":
+            msg = f"🔴 *{n} aposta{'s' if n>1 else ''} marcada{'s' if n>1 else ''} como RED*\n💸 Prejuízo total: -R$ {abs(total_lucro):.2f}"
+        else:
+            msg = f"⚪ *{n} aposta{'s' if n>1 else ''} marcada{'s' if n>1 else ''} como VOID*\n↩️ Stakes devolvidas"
+        try:
+            await app.bot.send_message(ALLOWED_CHAT_ID, msg, parse_mode="Markdown")
+        except Exception:
+            pass
+        return web.json_response({"ok": True, "msg": f"{cor} {n} apostas salvas!"}, headers={
+            "Access-Control-Allow-Origin": "*",
+        })
+
     web_app = web.Application()
     web_app.router.add_post(webhook_path, handle_webhook)
     web_app.router.add_get("/", handle_health)
     web_app.router.add_get("/webapp", handle_webapp)
     web_app.router.add_get("/pendentes", handle_pendentes)
     web_app.router.add_get("/resolve", handle_resolve)
+    web_app.router.add_get("/resolve-multi", handle_resolve_multi)
 
     runner = web.AppRunner(web_app)
 
