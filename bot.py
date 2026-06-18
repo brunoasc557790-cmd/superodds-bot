@@ -1,15 +1,17 @@
 """
 SuperOdds Bot — recebe prints de apostas no Telegram, lê via IA (Claude),
 pergunta valor/casa e grava direto no Firestore (mesma estrutura do dashboard).
+
+Usa WEBHOOK em vez de polling: o Telegram manda as mensagens diretamente
+pra uma URL HTTP nossa, em vez do bot ficar perguntando "tem mensagem nova?"
+sem parar. Isso é mais compatível com o modelo de Web Service do Render
+e evita os reinícios aleatórios que acontecem com polling de longa duração.
 """
 
 import os
 import json
 import logging
-import base64
-import threading
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from telegram import Update
 from telegram.ext import (
@@ -25,29 +27,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 # ══════════════════════════════════════════════════════════════════
-# SERVIDOR HTTP "FAKE" — só pra satisfazer o health check do Render.
-# O Render (Web Service) espera algo respondendo numa porta HTTP;
-# como o bot só conversa com o Telegram via polling, sem isso o
-# Render entende que o serviço travou e reinicia sozinho.
-# ══════════════════════════════════════════════════════════════════
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"SuperOdds Bot rodando!")
-
-    def log_message(self, format, *args):
-        pass  # silencia o log padrão do http.server pra não poluir os logs do bot
-
-
-def start_health_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    log.info(f"Servidor de health check rodando na porta {port}")
-    server.serve_forever()
-
-# ══════════════════════════════════════════════════════════════════
 # CONFIGURAÇÃO — lida de variáveis de ambiente (configuradas no Render)
 # ══════════════════════════════════════════════════════════════════
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -55,6 +34,7 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 ALLOWED_CHAT_ID = int(os.environ["ALLOWED_CHAT_ID"])     # seu chat id pessoal — só você usa o bot
 FIREBASE_UID = os.environ["FIREBASE_UID"]                 # seu UID do Google no Firebase
 FIREBASE_CREDENTIALS_JSON = os.environ["FIREBASE_CREDENTIALS_JSON"]  # conteúdo do service-account.json
+RENDER_EXTERNAL_URL = os.environ["RENDER_EXTERNAL_URL"]   # ex: https://superodds-bot.onrender.com (o Render já preenche essa automaticamente)
 
 # inicializa Firebase Admin
 cred_dict = json.loads(FIREBASE_CREDENTIALS_JSON)
@@ -319,18 +299,19 @@ def main():
     app.add_handler(conv)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, mensagem_nao_reconhecida))
 
-    log.info("Bot iniciado, aguardando mensagens...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    port = int(os.environ.get("PORT", 10000))
+    webhook_path = TELEGRAM_TOKEN  # usa o próprio token como "segredo" da URL, difícil de adivinhar
+    webhook_url = f"{RENDER_EXTERNAL_URL}/{webhook_path}"
+
+    log.info(f"Bot iniciado via webhook em {webhook_url}")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=webhook_path,
+        webhook_url=webhook_url,
+        allowed_updates=Update.ALL_TYPES,
+    )
 
 
 if __name__ == "__main__":
-    import asyncio
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
-
-    # inicia o servidor HTTP fake numa thread separada, em paralelo ao bot
-    threading.Thread(target=start_health_server, daemon=True).start()
-
     main()
