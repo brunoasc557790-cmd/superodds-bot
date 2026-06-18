@@ -309,13 +309,15 @@ EMOJI_ESPORTE = {
 }
 
 
-def formatar_resumo_aposta(b: dict, max_len: int = 45) -> str:
+def formatar_resumo_aposta(b: dict, max_ap: int = 28) -> str:
     emoji = EMOJI_ESPORTE.get(b.get("esp"), "🎲")
     ap = b.get("ap", "—")
-    odd = b.get("odd", "—")
-    if len(ap) > max_len:
-        ap = ap[:max_len - 1] + "…"
-    return f"{emoji} {ap} @{odd}"
+    odd = str(b.get("odd", "—"))
+    casa = b.get("casa", "")
+    if len(ap) > max_ap:
+        ap = ap[:max_ap - 1] + "…"
+    casa_str = f" {casa}" if casa else ""
+    return f"{emoji} {ap}{casa_str} @{odd}"
 
 
 async def iniciar_resolucao(update: Update, context: ContextTypes.DEFAULT_TYPE):
