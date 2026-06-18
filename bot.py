@@ -309,13 +309,13 @@ EMOJI_ESPORTE = {
 }
 
 
-def formatar_resumo_aposta(b: dict) -> str:
+def formatar_resumo_aposta(b: dict, max_len: int = 45) -> str:
     emoji = EMOJI_ESPORTE.get(b.get("esp"), "🎲")
     ap = b.get("ap", "—")
     odd = b.get("odd", "—")
-    casa = b.get("casa", "")
-    casa_str = f" · {casa}" if casa else ""
-    return f"{emoji} {ap} (@{odd}){casa_str}"
+    if len(ap) > max_len:
+        ap = ap[:max_len - 1] + "…"
+    return f"{emoji} {ap} @{odd}"
 
 
 async def iniciar_resolucao(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -335,24 +335,14 @@ async def iniciar_resolucao(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cor = {"GREEN": "🟢", "RED": "🔴", "VOID": "⚪"}.get(resultado, "")
     n = len(pendentes)
 
-    linhas = [f"{cor} *Marcar como {resultado}*", f"_{n} pendente{'s' if n != 1 else ''} hoje:_", ""]
-    for i, (bet_id, b) in enumerate(pendentes, start=1):
-        linhas.append(f"{i}. {formatar_resumo_aposta(b)}")
-    texto = "\n".join(linhas)
-
-    # botões compactos, só com o número, lado a lado em linhas de até 5
+    # botão grande por aposta, com número + resumo curto — toque direto na linha certa
     botoes = []
-    linha_atual = []
     for i, (bet_id, b) in enumerate(pendentes, start=1):
-        linha_atual.append(InlineKeyboardButton(str(i), callback_data=f"resolve|{resultado}|{bet_id}"))
-        if len(linha_atual) == 5:
-            botoes.append(linha_atual)
-            linha_atual = []
-    if linha_atual:
-        botoes.append(linha_atual)
+        texto_botao = f"{i}. {formatar_resumo_aposta(b)}"
+        botoes.append([InlineKeyboardButton(texto_botao, callback_data=f"resolve|{resultado}|{bet_id}")])
 
     await update.message.reply_text(
-        texto,
+        f"{cor} *Marcar como {resultado}*\n_{n} pendente{'s' if n != 1 else ''} hoje:_",
         reply_markup=InlineKeyboardMarkup(botoes),
         parse_mode="Markdown",
     )
