@@ -19,7 +19,8 @@ from telegram.ext import (
     ConversationHandler, CallbackQueryHandler, filters
 )
 
-import google.generativeai as genai
+from groq import Groq
+import base64
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -30,7 +31,7 @@ log = logging.getLogger(__name__)
 # CONFIGURAÇÃO — lida de variáveis de ambiente (configuradas no Render)
 # ══════════════════════════════════════════════════════════════════
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 ALLOWED_CHAT_ID = int(os.environ["ALLOWED_CHAT_ID"])     # seu chat id pessoal — só você usa o bot
 FIREBASE_UID = os.environ["FIREBASE_UID"]                 # seu UID do Google no Firebase
 FIREBASE_CREDENTIALS_JSON = os.environ["FIREBASE_CREDENTIALS_JSON"]  # conteúdo do service-account.json
@@ -42,8 +43,7 @@ cred = credentials.Certificate(cred_dict)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-2.0-flash")
+groq_client = Groq(api_key=GROQ_API_KEY)
 
 SPORTS = ['Futebol', 'Basquete', 'Tênis', 'MMA', 'Vôlei', 'E-sports', 'Outros']
 
@@ -62,7 +62,9 @@ def autorizado(update: Update) -> bool:
 # LEITURA DO PRINT VIA GEMINI (visão, gratuito)
 # ══════════════════════════════════════════════════════════════════
 def extrair_dados_print(image_bytes: bytes, media_type: str) -> dict:
-    """Manda o print pro Gemini e pede pra extrair os dados estruturados da aposta."""
+    """Manda o print pro Groq/Llama 4 e extrai os dados estruturados da aposta."""
+
+    img_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
 
     prompt = f"""Analise este print de bilhete de aposta esportiva e extraia os dados em JSON.
 
@@ -77,10 +79,19 @@ Responda APENAS com um único objeto JSON válido (nunca uma lista), sem nenhum 
 
 Se não conseguir identificar algum campo com confiança, use null nesse campo. A resposta deve ser um objeto único {{...}}, nunca uma lista [...]."""
 
-    image_part = {"mime_type": media_type, "data": image_bytes}
-    resp = gemini_model.generate_content([prompt, image_part])
+    resp = groq_client.chat.completions.create(
+        model="meta-llama/llama-4-scout-17b-16e-instruct",
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{img_b64}"}},
+                {"type": "text", "text": prompt}
+            ]
+        }],
+        max_tokens=500,
+    )
 
-    text = resp.text.strip()
+    text = resp.choices[0].message.content.strip()
     text = text.replace("```json", "").replace("```", "").strip()
     parsed = json.loads(text)
 
