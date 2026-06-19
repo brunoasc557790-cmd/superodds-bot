@@ -43,7 +43,7 @@ firebase_admin.initialize_app(cred)
 db = firestore.client()
 
 genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-2.5-flash-lite")
+gemini_model = genai.GenerativeModel("gemini-2.0-flash")
 
 SPORTS = ['Futebol', 'Basquete', 'Tênis', 'MMA', 'Vôlei', 'E-sports', 'Outros']
 
@@ -342,6 +342,69 @@ async def cmd_resolver(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_resumo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mostra o resumo do dia diretamente no chat."""
+    if not autorizado(update):
+        return
+
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    hoje_fmt = datetime.now().strftime("%d/%m")
+
+    bets_col = db.collection("users").document(FIREBASE_UID).collection("bets")
+    docs = bets_col.where("dat", "==", hoje).stream()
+    apostas_hoje = [doc.to_dict() for doc in docs]
+
+    if not apostas_hoje:
+        await update.message.reply_text(f"📊 Nenhuma aposta registrada hoje ({hoje_fmt}).")
+        return
+
+    green  = [b for b in apostas_hoje if b.get("res") == "GREEN"]
+    red    = [b for b in apostas_hoje if b.get("res") == "RED"]
+    void   = [b for b in apostas_hoje if b.get("res") == "VOID"]
+    pend   = [b for b in apostas_hoje if not b.get("res") or b.get("res") == "PENDENTE"]
+
+    lucro = 0.0
+    stake_total = 0.0
+    for b in apostas_hoje:
+        s = float(b.get("stake", 0) or 0)
+        o = float(b.get("odd", 0) or 0)
+        stake_total += s
+        if b.get("res") == "GREEN":
+            lucro += s * (o - 1)
+        elif b.get("res") == "RED":
+            lucro -= s
+
+    stake_pend = sum(float(b.get("stake", 0) or 0) for b in pend)
+    roi = (lucro / stake_total * 100) if stake_total > 0 else 0
+    resolvidas = len(green) + len(red)
+    acerto = (len(green) / resolvidas * 100) if resolvidas > 0 else 0
+
+    sinal = "+" if lucro >= 0 else ""
+    cor_lucro = "🟢" if lucro > 0 else "🔴" if lucro < 0 else "⚪"
+
+    linhas = [
+        f"📊 *Resumo de hoje — {hoje_fmt}*",
+        "",
+        f"✅ Green: *{len(green)}*  ❌ Red: *{len(red)}*  ⚪ Void: *{len(void)}*",
+        f"{cor_lucro} Lucro: *{sinal}R$ {lucro:.2f}*",
+        f"📈 ROI: *{sinal}{roi:.1f}%*",
+    ]
+
+    if resolvidas > 0:
+        linhas.append(f"🎯 Acerto: *{acerto:.0f}%*")
+
+    if pend:
+        linhas.append(f"⏳ Pendentes: *{len(pend)}* (R$ {stake_pend:.2f} em risco)")
+
+    linhas += [
+        "",
+        f"📋 Total apostas hoje: *{len(apostas_hoje)}*",
+        f"💵 Stake total: *R$ {stake_total:.2f}*",
+    ]
+
+    await update.message.reply_text("\n".join(linhas), parse_mode="Markdown")
+
+
 async def callback_resolver(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Disparado quando o usuário clica num dos botões de aposta pendente."""
     query = update.callback_query
@@ -407,6 +470,7 @@ async def run_bot():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("resolver", cmd_resolver))
+    app.add_handler(CommandHandler("resumo", cmd_resumo))
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(callback_resolver, pattern=r"^resolve\|"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, mensagem_nao_reconhecida))
