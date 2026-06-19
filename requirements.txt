@@ -1,4 +1,5 @@
 python-telegram-bot==21.10
 aiohttp==3.10.10
-groq==0.11.0
+groq==0.9.0
+httpx==0.27.2
 firebase-admin==6.5.0
