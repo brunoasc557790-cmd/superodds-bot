@@ -11,7 +11,19 @@ e evita os reinícios aleatórios que acontecem com polling de longa duração.
 import os
 import json
 import logging
-from datetime import datetime
+import base64
+from datetime import datetime, timezone, timedelta
+
+# fuso horário de Brasília (UTC-3)
+BRT = timezone(timedelta(hours=-3))
+
+def agora() -> datetime:
+    """Retorna o datetime atual no fuso de Brasília."""
+    return datetime.now(BRT)
+
+def hoje_local() -> str:
+    """Retorna a data de hoje no formato YYYY-MM-DD no fuso de Brasília."""
+    return agora().strftime("%Y-%m-%d")
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -118,12 +130,11 @@ Se não conseguir identificar algum campo com confiança, use null nesse campo. 
 def parsear_data(texto: str) -> str | None:
     """Retorna a data no formato YYYY-MM-DD, ou None se não conseguir entender."""
     texto = texto.strip().lower()
-    hoje = datetime.now()
+    hoje = agora()
 
     if texto in ("hoje", "h"):
         return hoje.strftime("%Y-%m-%d")
     if texto in ("ontem", "o"):
-        from datetime import timedelta
         return (hoje - timedelta(days=1)).strftime("%Y-%m-%d")
 
     # aceita dd/mm ou dd/mm/aaaa ou dd-mm ou dd-mm-aaaa
@@ -132,7 +143,7 @@ def parsear_data(texto: str) -> str | None:
             partes = texto.split(sep)
             if len(partes) == 2:
                 dia, mes = partes
-                ano = hoje.year
+                ano = agora().year
             elif len(partes) == 3:
                 dia, mes, ano = partes
                 ano = int(ano) if len(ano) == 4 else 2000 + int(ano)
@@ -171,7 +182,7 @@ def buscar_pendentes(apenas_hoje: bool = True):
     pendentes = [(doc.id, doc.to_dict()) for doc in docs]
 
     if apenas_hoje:
-        hoje = datetime.now().strftime("%Y-%m-%d")
+        hoje = hoje_local()
         pendentes = [(bid, b) for bid, b in pendentes if b.get("dat") == hoje]
 
     # ordena pela data da aposta, mais recente primeiro (fallback se não tiver "dat")
@@ -257,7 +268,7 @@ async def receber_casa(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["casa"] = update.message.text.strip()
 
-    hoje_fmt = datetime.now().strftime("%d/%m")
+    hoje_fmt = agora().strftime("%d/%m")
     await update.message.reply_text(
         f"📅 Qual o dia da aposta?\n"
         f"Manda 'hoje', 'ontem', ou a data (ex: {hoje_fmt})"
@@ -358,8 +369,8 @@ async def cmd_resumo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not autorizado(update):
         return
 
-    hoje = datetime.now().strftime("%Y-%m-%d")
-    hoje_fmt = datetime.now().strftime("%d/%m")
+    hoje = hoje_local()
+    hoje_fmt = agora().strftime("%d/%m")
 
     bets_col = db.collection("users").document(FIREBASE_UID).collection("bets")
     docs = bets_col.where("dat", "==", hoje).stream()
@@ -513,7 +524,7 @@ async def run_bot():
         """API: retorna apostas pendentes de hoje em JSON."""
         if request.rel_url.query.get("token") != TELEGRAM_TOKEN:
             return web.Response(status=403, text="Forbidden")
-        hoje = datetime.now().strftime("%Y-%m-%d")
+        hoje = hoje_local()
         bets_col = db.collection("users").document(FIREBASE_UID).collection("bets")
         docs = bets_col.where("res", "==", "PENDENTE").stream()
         pendentes = []
