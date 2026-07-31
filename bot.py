@@ -92,7 +92,7 @@ Responda APENAS com um único objeto JSON válido (nunca uma lista), sem nenhum 
 Se não conseguir identificar algum campo com confiança, use null nesse campo. A resposta deve ser um objeto único {{...}}, nunca uma lista [...]."""
 
     resp = groq_client.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",
+        model="qwen/qwen3.6-27b",
         messages=[{
             "role": "user",
             "content": [
@@ -645,6 +645,3 @@ async def run_bot():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(run_bot())
-
-
-
