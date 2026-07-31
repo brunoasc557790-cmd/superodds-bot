@@ -101,10 +101,23 @@ Se não conseguir identificar algum campo com confiança, use null nesse campo. 
             ]
         }],
         max_tokens=500,
+        reasoning_effort="none",  # desliga o modo thinking do qwen
     )
 
-    text = resp.choices[0].message.content.strip()
-    text = text.replace("```json", "").replace("```", "").strip()
+    text = resp.choices[0].message.content or ""
+    text = text.strip()
+
+    # extrai o primeiro bloco JSON da resposta (caso venha com texto antes/depois)
+    import re as _re
+    json_match = _re.search(r'\{[\s\S]*\}', text)
+    if json_match:
+        text = json_match.group(0)
+    else:
+        text = text.replace("```json", "").replace("```", "").strip()
+
+    if not text:
+        return {"esporte": None, "jogo_ou_aposta": None, "odd": None}
+
     parsed = json.loads(text)
 
     # defesa extra: se o modelo devolver uma lista (ex: várias seleções
