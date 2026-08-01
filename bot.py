@@ -112,9 +112,9 @@ Se não conseguir identificar algum campo com confiança, use null nesse campo. 
     text = resp.choices[0].message.content or ""
     text = text.strip()
 
-    # extrai o primeiro bloco JSON da resposta (caso venha com texto antes/depois)
+    # extrai o primeiro bloco JSON completo da resposta
     import re as _re
-    json_match = _re.search(r'\{[\s\S]*\}', text)
+    json_match = _re.search(r'\{[^{}]*\}', text, _re.DOTALL)
     if json_match:
         text = json_match.group(0)
     else:
