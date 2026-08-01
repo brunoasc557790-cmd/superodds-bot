@@ -93,15 +93,20 @@ Se não conseguir identificar algum campo com confiança, use null nesse campo. 
 
     resp = groq_client.chat.completions.create(
         model="qwen/qwen3.6-27b",
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{img_b64}"}},
-                {"type": "text", "text": prompt}
-            ]
-        }],
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a JSON extraction assistant. Respond ONLY with valid JSON, no thinking, no explanation, no markdown."
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{img_b64}"}},
+                    {"type": "text", "text": prompt}
+                ]
+            }
+        ],
         max_tokens=500,
-        reasoning_effort="none",  # desliga o modo thinking do qwen
     )
 
     text = resp.choices[0].message.content or ""
