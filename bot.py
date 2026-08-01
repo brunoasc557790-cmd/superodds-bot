@@ -31,8 +31,7 @@ from telegram.ext import (
     ConversationHandler, CallbackQueryHandler, filters
 )
 
-from groq import Groq
-import base64
+from openai import OpenAI
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -43,7 +42,7 @@ log = logging.getLogger(__name__)
 # CONFIGURAÇÃO — lida de variáveis de ambiente (configuradas no Render)
 # ══════════════════════════════════════════════════════════════════
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 ALLOWED_CHAT_ID = int(os.environ["ALLOWED_CHAT_ID"])     # seu chat id pessoal — só você usa o bot
 FIREBASE_UID = os.environ["FIREBASE_UID"]                 # seu UID do Google no Firebase
 FIREBASE_CREDENTIALS_JSON = os.environ["FIREBASE_CREDENTIALS_JSON"]  # conteúdo do service-account.json
@@ -55,7 +54,10 @@ cred = credentials.Certificate(cred_dict)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-groq_client = Groq(api_key=GROQ_API_KEY)
+openrouter_client = OpenAI(
+    api_key=OPENROUTER_API_KEY,
+    base_url="https://openrouter.ai/api/v1",
+)
 
 SPORTS = ['Futebol', 'Basquete', 'Tênis', 'MMA', 'Vôlei', 'E-sports', 'Outros']
 
@@ -96,8 +98,8 @@ Responda APENAS com um único objeto JSON válido, sem nenhum texto antes ou dep
 
 Se realmente não conseguir identificar algum campo, use null. Seja tolerante com formatos não convencionais."""
 
-    resp = groq_client.chat.completions.create(
-        model="qwen/qwen3.6-27b",
+    resp = openrouter_client.chat.completions.create(
+        model="google/gemini-flash-1.5",
         messages=[
             {
                 "role": "system",
