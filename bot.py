@@ -78,18 +78,23 @@ def extrair_dados_print(image_bytes: bytes, media_type: str) -> dict:
 
     img_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
 
-    prompt = f"""Analise este print de bilhete de aposta esportiva e extraia os dados em JSON.
+    prompt = f"""Analise esta imagem que pode ser um bilhete de aposta ou uma dica/tip de aposta esportiva e extraia os dados principais.
 
-Se houver múltiplas seleções no bilhete (aposta múltipla), trate como UMA única aposta combinada e descreva todas as seleções juntas no campo "jogo_ou_aposta", usando a odd TOTAL da combinação.
+Mesmo que seja uma mensagem de grupo ou tip (não um bilhete oficial), tente identificar:
+- O esporte (futebol, basquete, etc)
+- O jogo/mercado/seleção (times, mercado apostado)
+- A odd (cotação, pode estar como "1.85", ">> 2.30", "@ 2.30", etc)
 
-Responda APENAS com um único objeto JSON válido (nunca uma lista), sem nenhum texto antes ou depois, exatamente neste formato:
+Se houver múltiplas seleções, trate como UMA única aposta combinada usando a odd TOTAL.
+
+Responda APENAS com um único objeto JSON válido, sem nenhum texto antes ou depois:
 {{
   "esporte": "um destes: {', '.join(SPORTS)}",
-  "jogo_ou_aposta": "descrição curta do jogo/mercado, ex: 'Flamengo x Vasco - Over 2.5 gols'",
-  "odd": 1.85
+  "jogo_ou_aposta": "descrição curta, ex: 'Atlético MG x Juventude - Atlético MG vence + Mais de 0.5 gols 1T'",
+  "odd": 2.30
 }}
 
-Se não conseguir identificar algum campo com confiança, use null nesse campo. A resposta deve ser um objeto único {{...}}, nunca uma lista [...]."""
+Se realmente não conseguir identificar algum campo, use null. Seja tolerante com formatos não convencionais."""
 
     resp = groq_client.chat.completions.create(
         model="qwen/qwen3.6-27b",
