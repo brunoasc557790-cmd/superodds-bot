@@ -99,7 +99,7 @@ Responda APENAS com um único objeto JSON válido, sem nenhum texto antes ou dep
 Se realmente não conseguir identificar algum campo, use null. Seja tolerante com formatos não convencionais."""
 
     resp = openrouter_client.chat.completions.create(
-        model="google/gemini-flash-1.5",
+        model="google/gemini-1.5-flash",
         messages=[
             {
                 "role": "system",
