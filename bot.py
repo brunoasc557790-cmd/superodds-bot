@@ -123,7 +123,15 @@ Se não conseguir identificar algum campo com confiança, use null nesse campo. 
     if not text:
         return {"esporte": None, "jogo_ou_aposta": None, "odd": None}
 
-    parsed = json.loads(text)
+    # tenta parse direto; se falhar, tenta converter aspas simples pra duplas
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        import ast as _ast
+        try:
+            parsed = _ast.literal_eval(text)
+        except Exception:
+            return {"esporte": None, "jogo_ou_aposta": None, "odd": None}
 
     # defesa extra: se o modelo devolver uma lista (ex: várias seleções
     # separadas), usa o primeiro item e combina a descrição das demais
