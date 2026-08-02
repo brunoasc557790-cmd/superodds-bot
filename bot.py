@@ -98,23 +98,43 @@ Responda APENAS com um único objeto JSON válido, sem nenhum texto antes ou dep
 
 Se realmente não conseguir identificar algum campo, use null. Seja tolerante com formatos não convencionais."""
 
-    resp = openrouter_client.chat.completions.create(
-        model="google/gemma-4-31b-it:free",
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a JSON extraction assistant. Respond ONLY with valid JSON, no thinking, no explanation, no markdown."
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{img_b64}"}},
-                    {"type": "text", "text": prompt}
-                ]
-            }
-        ],
-        max_tokens=500,
-    )
+    # modelos de visão gratuitos em ordem de preferência — tenta o próximo se o atual falhar
+    MODELOS_VISAO = [
+        "google/gemma-4-31b-it:free",
+        "google/gemma-4-26b-a4b-it:free",
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+        "openrouter/free",
+    ]
+
+    resp = None
+    ultimo_erro = None
+    for modelo in MODELOS_VISAO:
+        try:
+            resp = openrouter_client.chat.completions.create(
+                model=modelo,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a JSON extraction assistant. Respond ONLY with valid JSON, no thinking, no explanation, no markdown."
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{img_b64}"}},
+                            {"type": "text", "text": prompt}
+                        ]
+                    }
+                ],
+                max_tokens=500,
+            )
+            break  # sucesso, sai do loop
+        except Exception as e:
+            log.warning(f"Modelo {modelo} falhou: {e}")
+            ultimo_erro = e
+            continue
+
+    if resp is None:
+        raise Exception(f"Todos os modelos falharam. Último erro: {ultimo_erro}")
 
     text = resp.choices[0].message.content or ""
     text = text.strip()
