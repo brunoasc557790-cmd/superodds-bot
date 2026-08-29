@@ -236,6 +236,9 @@ async function load(date) {
 const provider=new firebase.auth.GoogleAuthProvider();
 provider.setCustomParameters({prompt:'select_account'});
 
+// captura o resultado do redirect (caso o usuário tenha sido redirecionado de volta)
+auth.getRedirectResult().catch(e => console.warn('redirect result:', e));
+
 function showLogin() {
   document.getElementById('main').innerHTML=`
     <div style="display:flex;align-items:center;justify-content:center;min-height:60vh">
@@ -253,8 +256,17 @@ function showLogin() {
 }
 
 async function loginGoogle() {
-  try { await auth.signInWithPopup(provider); }
-  catch(e) { document.getElementById('login-err').textContent='Erro: '+e.message; }
+  try {
+    // no mobile/Telegram usa redirect; no desktop usa popup
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.Telegram?.WebApp;
+    if (isMobile) {
+      await auth.signInWithRedirect(provider);
+    } else {
+      await auth.signInWithPopup(provider);
+    }
+  } catch(e) {
+    document.getElementById('login-err').textContent='Erro: '+e.message;
+  }
 }
 
 async function logout() {
