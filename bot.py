@@ -76,7 +76,7 @@ def autorizado(update: Update) -> bool:
 # LEITURA DO PRINT VIA GEMINI (visão, gratuito)
 # ══════════════════════════════════════════════════════════════════
 def extrair_dados_print(image_bytes: bytes, media_type: str) -> dict:
-    """Manda o print pro Groq/Llama 4 e extrai os dados estruturados da aposta."""
+    """Manda o print pro Gemini 2.5 Flash via OpenRouter e extrai os dados."""
 
     img_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
 
@@ -98,43 +98,23 @@ Responda APENAS com um único objeto JSON válido, sem nenhum texto antes ou dep
 
 Se realmente não conseguir identificar algum campo, use null. Seja tolerante com formatos não convencionais."""
 
-    # modelos de visão gratuitos em ordem de preferência — tenta o próximo se o atual falhar
-    MODELOS_VISAO = [
-        "google/gemma-4-31b-it:free",
-        "google/gemma-4-26b-a4b-it:free",
-        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-        "openrouter/free",
-    ]
-
-    resp = None
-    ultimo_erro = None
-    for modelo in MODELOS_VISAO:
-        try:
-            resp = openrouter_client.chat.completions.create(
-                model=modelo,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a JSON extraction assistant. Respond ONLY with valid JSON, no thinking, no explanation, no markdown."
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{img_b64}"}},
-                            {"type": "text", "text": prompt}
-                        ]
-                    }
-                ],
-                max_tokens=500,
-            )
-            break  # sucesso, sai do loop
-        except Exception as e:
-            log.warning(f"Modelo {modelo} falhou: {e}")
-            ultimo_erro = e
-            continue
-
-    if resp is None:
-        raise Exception(f"Todos os modelos falharam. Último erro: {ultimo_erro}")
+    resp = openrouter_client.chat.completions.create(
+        model="google/gemini-2.5-flash",
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a JSON extraction assistant. Respond ONLY with valid JSON, no thinking, no explanation, no markdown."
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{img_b64}"}},
+                    {"type": "text", "text": prompt}
+                ]
+            }
+        ],
+        max_tokens=500,
+    )
 
     if not resp or not resp.choices:
         return {"esporte": None, "jogo_ou_aposta": None, "odd": None}
@@ -142,7 +122,6 @@ Se realmente não conseguir identificar algum campo, use null. Seja tolerante co
     text = resp.choices[0].message.content or ""
     text = text.strip()
 
-    # extrai o primeiro bloco JSON completo da resposta
     import re as _re
     json_match = _re.search(r'\{[^{}]*\}', text, _re.DOTALL)
     if json_match:
@@ -153,7 +132,6 @@ Se realmente não conseguir identificar algum campo, use null. Seja tolerante co
     if not text:
         return {"esporte": None, "jogo_ou_aposta": None, "odd": None}
 
-    # tenta parse direto; se falhar, tenta converter aspas simples pra duplas
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
@@ -163,8 +141,6 @@ Se realmente não conseguir identificar algum campo, use null. Seja tolerante co
         except Exception:
             return {"esporte": None, "jogo_ou_aposta": None, "odd": None}
 
-    # defesa extra: se o modelo devolver uma lista (ex: várias seleções
-    # separadas), usa o primeiro item e combina a descrição das demais
     if isinstance(parsed, list):
         if not parsed:
             return {"esporte": None, "jogo_ou_aposta": None, "odd": None}
