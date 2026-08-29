@@ -136,6 +136,9 @@ Se realmente não conseguir identificar algum campo, use null. Seja tolerante co
     if resp is None:
         raise Exception(f"Todos os modelos falharam. Último erro: {ultimo_erro}")
 
+    if not resp or not resp.choices:
+        return {"esporte": None, "jogo_ou_aposta": None, "odd": None}
+
     text = resp.choices[0].message.content or ""
     text = text.strip()
 
