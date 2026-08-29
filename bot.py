@@ -192,7 +192,7 @@ def parsear_data(texto: str) -> str | None:
 # ══════════════════════════════════════════════════════════════════
 # FIRESTORE — grava a aposta no mesmo formato do dashboard
 # ══════════════════════════════════════════════════════════════════
-def gravar_aposta(esp: str, ap: str, odd: float, stake: float, casa: str, dat: str):
+def gravar_aposta(esp: str, ap: str, odd: float, stake: float, casa: str, dat: str) -> str:
     bet = {
         "dat": dat,
         "esp": esp or "Outros",
@@ -203,7 +203,8 @@ def gravar_aposta(esp: str, ap: str, odd: float, stake: float, casa: str, dat: s
         "res": "PENDENTE",
         "createdAt": firestore.SERVER_TIMESTAMP,
     }
-    db.collection("users").document(FIREBASE_UID).collection("bets").add(bet)
+    ref = db.collection("users").document(FIREBASE_UID).collection("bets").add(bet)
+    return ref[1].id  # retorna o ID gerado pelo Firestore
 
 
 def buscar_pendentes(apenas_hoje: bool = True):
@@ -332,21 +333,114 @@ async def receber_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d["dat"] = dat
 
     try:
-        gravar_aposta(d["esp"], d["ap"], d["odd"], d["stake"], d["casa"], d["dat"])
+        bet_id = gravar_aposta(d["esp"], d["ap"], d["odd"], d["stake"], d["casa"], d["dat"])
     except Exception as e:
         log.exception("Erro ao gravar no Firestore")
         await update.message.reply_text(f"⚠ Erro ao salvar no dashboard: {e}")
         return ConversationHandler.END
 
     data_fmt = datetime.strptime(dat, "%Y-%m-%d").strftime("%d/%m/%Y")
+    botao = [[InlineKeyboardButton("✏️ Editar aposta", callback_data=f"editar|{bet_id}")]]
     await update.message.reply_text(
         f"🎉 Aposta cadastrada como PENDENTE!\n\n"
         f"🏅 {d['esp']}\n🎯 {d['ap']}\n📈 Odd {d['odd']}\n"
         f"💰 R$ {d['stake']:.2f}\n🏦 {d['casa']}\n📅 {data_fmt}\n\n"
-        f"Resolve ela (Green/Red/Void) direto no dashboard quando o jogo acabar."
+        f"Resolve ela (Green/Red/Void) direto no dashboard quando o jogo acabar.",
+        reply_markup=InlineKeyboardMarkup(botao),
     )
     context.user_data.clear()
     return ConversationHandler.END
+
+
+# ══════════════════════════════════════════════════════════════════
+# EDITAR APOSTA VIA BOT
+# ══════════════════════════════════════════════════════════════════
+AGUARDANDO_CAMPO, AGUARDANDO_NOVO_VALOR = range(10, 12)
+
+CAMPOS_EDITAVEIS = {
+    "esp": "🏅 Esporte",
+    "ap": "🎯 Aposta",
+    "odd": "📈 Odd",
+    "stake": "💰 Valor (R$)",
+    "casa": "🏦 Casa",
+    "dat": "📅 Data",
+}
+
+async def callback_editar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Abre o menu de edição ao clicar no botão ✏️"""
+    query = update.callback_query
+    if query.message.chat.id != ALLOWED_CHAT_ID:
+        return
+    await query.answer()
+
+    _, bet_id = query.data.split("|", 1)
+    context.user_data["edit_bet_id"] = bet_id
+
+    botoes = [[InlineKeyboardButton(label, callback_data=f"campo|{campo}")]
+              for campo, label in CAMPOS_EDITAVEIS.items()]
+    botoes.append([InlineKeyboardButton("❌ Cancelar", callback_data="campo|cancelar")])
+
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        "✏️ O que você quer editar?",
+        reply_markup=InlineKeyboardMarkup(botoes),
+    )
+
+
+async def callback_campo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Recebe qual campo editar e pede o novo valor."""
+    query = update.callback_query
+    if query.message.chat.id != ALLOWED_CHAT_ID:
+        return
+    await query.answer()
+
+    campo = query.data.split("|", 1)[1]
+
+    if campo == "cancelar":
+        await query.edit_message_text("Edição cancelada.")
+        context.user_data.pop("edit_bet_id", None)
+        return
+
+    context.user_data["edit_campo"] = campo
+    label = CAMPOS_EDITAVEIS.get(campo, campo)
+
+    await query.edit_message_text(f"✏️ Novo valor para *{label}*:", parse_mode="Markdown")
+    return
+
+
+async def receber_novo_valor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Recebe o novo valor e atualiza no Firestore."""
+    if not autorizado(update):
+        return
+    if "edit_bet_id" not in context.user_data or "edit_campo" not in context.user_data:
+        return
+
+    bet_id = context.user_data.pop("edit_bet_id")
+    campo = context.user_data.pop("edit_campo")
+    novo = update.message.text.strip()
+
+    # converte tipos
+    try:
+        if campo == "odd":
+            novo = float(novo.replace(",", "."))
+        elif campo == "stake":
+            novo = float(novo.replace(",", ".").replace("R$", "").strip())
+        elif campo == "dat":
+            novo = parsear_data(novo)
+            if not novo:
+                await update.message.reply_text("⚠ Data inválida. Tenta 'hoje', 'ontem' ou dd/mm.")
+                return
+    except ValueError:
+        await update.message.reply_text("⚠ Valor inválido. Tenta de novo.")
+        return
+
+    try:
+        bets_col = db.collection("users").document(FIREBASE_UID).collection("bets")
+        bets_col.document(bet_id).update({campo: novo})
+        label = CAMPOS_EDITAVEIS.get(campo, campo)
+        await update.message.reply_text(f"✅ *{label}* atualizado!", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"⚠ Erro ao atualizar: {e}")
 
 
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -536,6 +630,9 @@ async def run_bot():
     app.add_handler(CommandHandler("resumo", cmd_resumo))
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(callback_resolver, pattern=r"^resolve\|"))
+    app.add_handler(CallbackQueryHandler(callback_editar, pattern=r"^editar\|"))
+    app.add_handler(CallbackQueryHandler(callback_campo, pattern=r"^campo\|"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receber_novo_valor))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, mensagem_nao_reconhecida))
 
     port = int(os.environ.get("PORT", 10000))
