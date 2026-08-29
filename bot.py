@@ -499,7 +499,21 @@ async def cmd_resolver(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def cmd_resumo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_dia(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Abre o Mini App visual de resumo do dia."""
+    if not autorizado(update):
+        return
+    from telegram import WebAppInfo
+    webapp_url = f"{RENDER_EXTERNAL_URL}/dia-app"
+    botao = [[InlineKeyboardButton(
+        "📊 Abrir resumo do dia",
+        web_app=WebAppInfo(url=webapp_url)
+    )]]
+    await update.message.reply_text(
+        "📊 *Resumo do dia*\nEscolha qualquer data para visualizar:",
+        reply_markup=InlineKeyboardMarkup(botao),
+        parse_mode="Markdown",
+    )
     """Mostra o resumo do dia diretamente no chat."""
     if not autorizado(update):
         return
@@ -628,6 +642,7 @@ async def run_bot():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("resolver", cmd_resolver))
     app.add_handler(CommandHandler("resumo", cmd_resumo))
+    app.add_handler(CommandHandler("dia", cmd_dia))
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(callback_resolver, pattern=r"^resolve\|"))
     app.add_handler(CallbackQueryHandler(callback_editar, pattern=r"^editar\|"))
@@ -805,10 +820,21 @@ async def run_bot():
             headers={"Access-Control-Allow-Origin": "*"}
         )
 
+    async def handle_dia_app(request: web.Request) -> web.Response:
+        """Serve o HTML do resumo diário como Mini App."""
+        import os as _os
+        html_path = _os.path.join(_os.path.dirname(__file__), "resumo.html")
+        with open(html_path, "r", encoding="utf-8") as f:
+            html = f.read()
+        return web.Response(text=html, content_type="text/html", headers={
+            "Access-Control-Allow-Origin": "*",
+        })
+
     web_app = web.Application()
     web_app.router.add_post(webhook_path, handle_webhook)
     web_app.router.add_get("/", handle_health)
     web_app.router.add_get("/webapp", handle_webapp)
+    web_app.router.add_get("/dia-app", handle_dia_app)
     web_app.router.add_get("/pendentes", handle_pendentes)
     web_app.router.add_get("/resolve", handle_resolve)
     web_app.router.add_get("/resolve-multi", handle_resolve_multi)
@@ -837,3 +863,6 @@ async def run_bot():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(run_bot())
+
+
+
