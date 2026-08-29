@@ -26,39 +26,45 @@
   }
   .header-title { font-size: 15px; font-weight: 700; flex: 1; }
   .header-sub { font-size: 11px; color: var(--t2); margin-top: 2px; }
-  .sel-count {
+  .header-count {
     font-size: 11px; font-family: var(--mono); font-weight: 700;
     padding: 3px 10px; border-radius: 20px;
     background: var(--s3); border: 1px solid var(--b0); color: var(--t2);
     transition: all .2s;
   }
-  .sel-count.has-sel { background: var(--s2); border-color: var(--amber); color: var(--amber); }
+  .header-count.active { border-color: var(--green); color: var(--green); background: var(--gbg); }
 
-  .list { padding: 10px 12px 130px; display: flex; flex-direction: column; gap: 8px; }
+  .list { padding: 10px 12px 140px; display: flex; flex-direction: column; gap: 10px; }
 
   .card {
     background: var(--s2); border: 1.5px solid var(--b0); border-radius: 14px;
-    padding: 13px 14px; cursor: pointer;
-    transition: background .12s, border-color .12s, transform .08s;
-    user-select: none; -webkit-user-select: none; position: relative;
+    padding: 13px 14px; user-select: none; -webkit-user-select: none;
+    transition: border-color .15s, background .15s;
   }
-  .card:active { transform: scale(.98); }
-  .card.sel { border-color: var(--amber); background: #120e02; }
-  .card.sel::after {
-    content: '✓'; position: absolute; top: 10px; right: 12px;
-    color: var(--amber); font-weight: 700; font-size: 15px;
-  }
+  .card.green { border-color: var(--gbr); background: var(--gbg); }
+  .card.red   { border-color: var(--rbr); background: var(--rbg); }
+  .card.void  { border-color: var(--bbr); background: var(--bbg); }
 
-  .card-top { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 8px; }
+  .card-top { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 10px; }
   .card-emoji { font-size: 20px; flex-shrink: 0; margin-top: 1px; }
-  .card-ap { flex: 1; font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.4; padding-right: 20px; }
-  .card-meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  .meta-tag {
-    font-size: 11px; font-family: var(--mono); color: var(--t2);
-    background: var(--s3); border: 1px solid var(--b0); border-radius: 6px; padding: 2px 8px;
-  }
+  .card-ap { flex: 1; font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.4; }
+  .card-meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .meta-tag { font-size: 11px; font-family: var(--mono); color: var(--t2);
+    background: var(--s3); border: 1px solid var(--b0); border-radius: 6px; padding: 2px 8px; }
   .meta-odd { font-size: 13px; font-family: var(--mono); font-weight: 700; color: var(--amber); }
   .meta-stake { font-size: 11px; font-family: var(--mono); color: var(--t2); margin-left: auto; }
+
+  .card-btns { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+  .res-btn {
+    padding: 8px 4px; border-radius: 8px; border: 1.5px solid var(--b0);
+    font-size: 12px; font-weight: 700; font-family: 'Outfit', sans-serif;
+    cursor: pointer; background: var(--s3); color: var(--t2);
+    transition: all .12s; text-align: center;
+  }
+  .res-btn:active { transform: scale(.95); }
+  .res-btn.sel-green { background: var(--gbg); border-color: var(--gbr); color: var(--green); }
+  .res-btn.sel-red   { background: var(--rbg); border-color: var(--rbr); color: var(--red); }
+  .res-btn.sel-void  { background: var(--bbg); border-color: var(--bbr); color: var(--blue); }
 
   .empty { text-align: center; color: var(--t3); padding: 60px 20px; font-size: 15px; line-height: 1.6; }
   .empty-icon { font-size: 40px; margin-bottom: 12px; }
@@ -68,19 +74,15 @@
     background: var(--s1); border-top: 1px solid var(--b0);
     padding: 10px 12px 14px;
   }
-  .footer-label { font-size: 11px; color: var(--t3); text-align: center; margin-bottom: 8px; font-family: var(--mono); }
-  .btns { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
-  .btn {
-    padding: 13px 6px; border-radius: 12px; border: none;
-    font-size: 14px; font-weight: 700; font-family: 'Outfit', sans-serif;
-    cursor: pointer; transition: opacity .15s, transform .1s;
-    display: flex; align-items: center; justify-content: center; gap: 5px;
+  .footer-label { font-size: 11px; color: var(--t3); text-align: center; margin-bottom: 8px; }
+  .btn-confirmar {
+    width: 100%; padding: 14px; border-radius: 12px; border: none;
+    font-size: 15px; font-weight: 700; font-family: 'Outfit', sans-serif;
+    background: var(--green); color: #000; cursor: pointer;
+    transition: opacity .15s, transform .1s;
   }
-  .btn:active { transform: scale(.96); }
-  .btn:disabled { opacity: .3; cursor: default; pointer-events: none; }
-  .btn-green { background: var(--green); color: #000; }
-  .btn-red   { background: var(--red);   color: #fff; }
-  .btn-void  { background: var(--blue);  color: #000; }
+  .btn-confirmar:active { transform: scale(.97); }
+  .btn-confirmar:disabled { opacity: .3; cursor: default; pointer-events: none; }
 
   .loading { display: flex; justify-content: center; align-items: center; height: 200px; color: var(--t3); gap: 8px; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -102,7 +104,7 @@
     <div class="header-title">⚡ Resolver Apostas</div>
     <div class="header-sub" id="h-sub">carregando...</div>
   </div>
-  <div class="sel-count" id="sel-count">0 selecionadas</div>
+  <div class="header-count" id="h-count">0 marcadas</div>
 </div>
 
 <div class="list" id="list">
@@ -110,12 +112,8 @@
 </div>
 
 <div class="footer">
-  <div class="footer-label" id="footer-label">Selecione as apostas para resolver</div>
-  <div class="btns">
-    <button class="btn btn-green" id="btn-green" disabled onclick="confirmar('GREEN')">🟢 GREEN</button>
-    <button class="btn btn-red"   id="btn-red"   disabled onclick="confirmar('RED')">🔴 RED</button>
-    <button class="btn btn-void"  id="btn-void"  disabled onclick="confirmar('VOID')">⚪ VOID</button>
-  </div>
+  <div class="footer-label" id="footer-label">Selecione o resultado de cada aposta</div>
+  <button class="btn-confirmar" id="btn-confirmar" disabled onclick="confirmar()">✓ Confirmar tudo</button>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -130,8 +128,9 @@ const TOKEN = params.get('token') || '';
 
 const EMOJI = { 'Futebol':'⚽','Basquete':'🏀','Tênis':'🎾','MMA':'🥊','Vôlei':'🏐','E-sports':'🎮','Outros':'🎲' };
 
-let selected = new Set();
-let allBets = [];
+// mapa de { bet_id: resultado }
+const resultados = {};
+let totalBets = 0;
 
 function fmt(v) { return 'R$ ' + parseFloat(v).toFixed(2).replace('.',','); }
 
@@ -143,25 +142,35 @@ function toast(msg) {
 }
 
 function updateUI() {
-  const n = selected.size;
-  const cnt = document.getElementById('sel-count');
-  cnt.textContent = n === 0 ? '0 selecionadas' : `${n} selecionada${n>1?'s':''}`;
-  cnt.className = 'sel-count' + (n > 0 ? ' has-sel' : '');
-  const disabled = n === 0;
-  ['btn-green','btn-red','btn-void'].forEach(id => document.getElementById(id).disabled = disabled);
+  const n = Object.keys(resultados).length;
+  const cnt = document.getElementById('h-count');
+  cnt.textContent = n === 0 ? '0 marcadas' : `${n} marcada${n>1?'s':''}`;
+  cnt.className = 'header-count' + (n > 0 ? ' active' : '');
+  document.getElementById('btn-confirmar').disabled = n === 0;
   document.getElementById('footer-label').textContent = n === 0
-    ? 'Selecione as apostas para resolver'
-    : `${n} aposta${n>1?'s':''} selecionada${n>1?'s':''} — escolha o resultado:`;
+    ? 'Selecione o resultado de cada aposta'
+    : `${n} de ${totalBets} marcada${n>1?'s':''} — toque em "Confirmar tudo"`;
 }
 
-function toggleCard(el, id) {
-  if (selected.has(id)) { selected.delete(id); el.classList.remove('sel'); }
-  else { selected.add(id); el.classList.add('sel'); }
+function selectResult(betId, resultado, btn) {
+  // desmarca o anterior no mesmo card
+  const card = btn.closest('.card');
+  card.querySelectorAll('.res-btn').forEach(b => b.className = 'res-btn');
+  card.className = 'card';
+
+  // se clicou no mesmo resultado já selecionado, desmarca
+  if (resultados[betId] === resultado) {
+    delete resultados[betId];
+  } else {
+    resultados[betId] = resultado;
+    btn.classList.add(`sel-${resultado.toLowerCase()}`);
+    card.classList.add(resultado.toLowerCase());
+  }
   updateUI();
 }
 
 function renderList(bets) {
-  allBets = bets;
+  totalBets = bets.length;
   const list = document.getElementById('list');
   if (!bets || bets.length === 0) {
     list.innerHTML = `<div class="empty"><div class="empty-icon">✅</div>Nenhuma aposta pendente hoje!</div>`;
@@ -172,7 +181,7 @@ function renderList(bets) {
   list.innerHTML = bets.map(b => {
     const emoji = EMOJI[b.esp] || '🎲';
     const stake = b.stake ? fmt(b.stake) : null;
-    return `<div class="card" data-id="${b.id}" onclick="toggleCard(this,'${b.id}')">
+    return `<div class="card" id="card-${b.id}">
       <div class="card-top">
         <div class="card-emoji">${emoji}</div>
         <div class="card-ap">${b.ap||'—'}</div>
@@ -182,18 +191,27 @@ function renderList(bets) {
         <span class="meta-odd">@${b.odd??'—'}</span>
         ${stake ? `<span class="meta-stake">${stake}</span>` : ''}
       </div>
+      <div class="card-btns">
+        <button class="res-btn" onclick="selectResult('${b.id}','GREEN',this)">🟢 GREEN</button>
+        <button class="res-btn" onclick="selectResult('${b.id}','RED',this)">🔴 RED</button>
+        <button class="res-btn" onclick="selectResult('${b.id}','VOID',this)">⚪ VOID</button>
+      </div>
     </div>`;
   }).join('');
 }
 
-async function confirmar(resultado) {
-  if (selected.size === 0) return;
-  ['btn-green','btn-red','btn-void'].forEach(id => document.getElementById(id).disabled = true);
+async function confirmar() {
+  if (Object.keys(resultados).length === 0) return;
+  document.getElementById('btn-confirmar').disabled = true;
   document.getElementById('footer-label').textContent = 'Salvando...';
 
-  const ids = Array.from(selected);
+  const payload = JSON.stringify(resultados);
   try {
-    const r = await fetch(`/resolve-multi?token=${TOKEN}&res=${resultado}&ids=${ids.join(',')}`);
+    const r = await fetch(`/resolve-multi-v2?token=${TOKEN}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: payload,
+    });
     if (!r.ok) throw new Error('Erro ' + r.status);
     const data = await r.json();
     toast(data.msg || '✓ Salvo!');
