@@ -514,6 +514,9 @@ async def cmd_dia(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(botao),
         parse_mode="Markdown",
     )
+
+
+async def cmd_resumo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mostra o resumo do dia diretamente no chat."""
     if not autorizado(update):
         return
@@ -863,6 +866,3 @@ async def run_bot():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(run_bot())
-
-
-
