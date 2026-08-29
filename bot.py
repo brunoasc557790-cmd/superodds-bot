@@ -752,6 +752,59 @@ async def run_bot():
             "Access-Control-Allow-Origin": "*",
         })
 
+    async def handle_resolve_multi_v2(request: web.Request) -> web.Response:
+        """API: resolve apostas com resultados individuais. Body: {bet_id: resultado}"""
+        if request.rel_url.query.get("token") != TELEGRAM_TOKEN:
+            return web.Response(status=403, text="Forbidden")
+        try:
+            data = await request.json()
+        except Exception:
+            return web.Response(status=400, text="JSON inválido")
+
+        bets_col = db.collection("users").document(FIREBASE_UID).collection("bets")
+        green_lucro = red_lucro = 0.0
+        green_n = red_n = void_n = 0
+
+        for bet_id, resultado in data.items():
+            if resultado not in ("GREEN", "RED", "VOID"):
+                continue
+            doc = bets_col.document(bet_id).get()
+            b = doc.to_dict() if doc.exists else {}
+            bets_col.document(bet_id).update({"res": resultado})
+            try:
+                stake = float(b.get("stake", 0) or 0)
+                odd = float(b.get("odd", 0) or 0)
+                if resultado == "GREEN":
+                    green_lucro += stake * (odd - 1)
+                    green_n += 1
+                elif resultado == "RED":
+                    red_lucro -= stake
+                    red_n += 1
+                elif resultado == "VOID":
+                    void_n += 1
+            except (TypeError, ValueError):
+                pass
+
+        # monta mensagem de confirmação
+        linhas = ["✅ *Apostas resolvidas!*"]
+        if green_n: linhas.append(f"🟢 {green_n} GREEN · Lucro: +R$ {green_lucro:.2f}")
+        if red_n:   linhas.append(f"🔴 {red_n} RED · Prejuízo: -R$ {abs(red_lucro):.2f}")
+        if void_n:  linhas.append(f"⚪ {void_n} VOID")
+        total = green_lucro + red_lucro
+        if green_n or red_n:
+            sinal = "+" if total >= 0 else ""
+            linhas.append(f"\n💰 Resultado líquido: *{sinal}R$ {total:.2f}*")
+
+        msg = "\n".join(linhas)
+        try:
+            await app.bot.send_message(ALLOWED_CHAT_ID, msg, parse_mode="Markdown")
+        except Exception:
+            pass
+        return web.json_response(
+            {"ok": True, "msg": f"✅ {green_n+red_n+void_n} apostas salvas!"},
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
+
     web_app = web.Application()
     web_app.router.add_post(webhook_path, handle_webhook)
     web_app.router.add_get("/", handle_health)
@@ -759,6 +812,7 @@ async def run_bot():
     web_app.router.add_get("/pendentes", handle_pendentes)
     web_app.router.add_get("/resolve", handle_resolve)
     web_app.router.add_get("/resolve-multi", handle_resolve_multi)
+    web_app.router.add_post("/resolve-multi-v2", handle_resolve_multi_v2)
 
     runner = web.AppRunner(web_app)
 
