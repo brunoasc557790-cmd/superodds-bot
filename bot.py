@@ -284,9 +284,18 @@ async def receber_print(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
+    try:
+        odd_valor = float(dados["odd"])
+    except (TypeError, ValueError):
+        await update.message.reply_text(
+            "⚠ Não consegui identificar a odd com certeza.\n"
+            "Pode mandar um print mais nítido?"
+        )
+        return ConversationHandler.END
+
     context.user_data["esp"] = dados.get("esporte") or "Outros"
     context.user_data["ap"] = dados["jogo_ou_aposta"]
-    context.user_data["odd"] = float(dados["odd"])
+    context.user_data["odd"] = odd_valor
 
     resumo = (
         f"✅ Identifiquei:\n\n"
