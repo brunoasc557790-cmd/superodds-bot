@@ -1,28 +1,39 @@
 """
-SuperOdds Bot — recebe prints de apostas no Telegram, lê via IA (Claude),
+SuperOdds Bot — recebe prints de apostas no Telegram, lê via IA,
 pergunta valor/casa e grava direto no Firestore (mesma estrutura do dashboard).
 
-Usa WEBHOOK em vez de polling: o Telegram manda as mensagens diretamente
-pra uma URL HTTP nossa, em vez do bot ficar perguntando "tem mensagem nova?"
-sem parar. Isso é mais compatível com o modelo de Web Service do Render
-e evita os reinícios aleatórios que acontecem com polling de longa duração.
+NESTA VERSÃO:
+  • Funciona no seu PRIVADO (uso solo do dia a dia, igual antes)
+    E dentro de um GRUPO (várias pessoas planilhando no mesmo dashboard).
+  • Detecta ESCADA: quando o print tem a mesma aposta em várias linhas
+    (ex: Mais de 1.5 / 2.5 / 3.5), cada linha vira uma aposta separada,
+    todas com o mesmo `grupo` pra o dashboard agrupar.
+  • Cada aposta guarda o AUTOR (quem mandou o print).
+  • NOVO: detecta apostas feitas em CRIPTO (LTC, BTC, ETH, USDT — casas
+    tipo TrustDice usam Ł, ₿, Ξ). Busca a cotação atual em BRL (CoinGecko)
+    no momento do registro e grava o valor JÁ CONVERTIDO no campo `stake`
+    (o dashboard continua só em reais, sem precisar mudar nada). O valor
+    original na cripto e a cotação usada ficam guardados como referência.
+
+Usa WEBHOOK em vez de polling.
 """
 
 import os
 import json
+import uuid
 import logging
 import base64
+import requests
+from math import prod
 from datetime import datetime, timezone, timedelta
 
 # fuso horário de Brasília (UTC-3)
 BRT = timezone(timedelta(hours=-3))
 
 def agora() -> datetime:
-    """Retorna o datetime atual no fuso de Brasília."""
     return datetime.now(BRT)
 
 def hoje_local() -> str:
-    """Retorna a data de hoje no formato YYYY-MM-DD no fuso de Brasília."""
     return agora().strftime("%Y-%m-%d")
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -30,7 +41,6 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes,
     ConversationHandler, CallbackQueryHandler, filters
 )
-
 from openai import OpenAI
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -39,14 +49,30 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 # ══════════════════════════════════════════════════════════════════
-# CONFIGURAÇÃO — lida de variáveis de ambiente (configuradas no Render)
+# CONFIGURAÇÃO — variáveis de ambiente (Render)
 # ══════════════════════════════════════════════════════════════════
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
-ALLOWED_CHAT_ID = int(os.environ["ALLOWED_CHAT_ID"])     # seu chat id pessoal — só você usa o bot
-FIREBASE_UID = os.environ["FIREBASE_UID"]                 # seu UID do Google no Firebase
-FIREBASE_CREDENTIALS_JSON = os.environ["FIREBASE_CREDENTIALS_JSON"]  # conteúdo do service-account.json
-RENDER_EXTERNAL_URL = os.environ["RENDER_EXTERNAL_URL"]   # ex: https://superodds-bot.onrender.com (o Render já preenche essa automaticamente)
+
+# seu chat pessoal (privado com o bot) — uso solo do dia a dia
+ALLOWED_CHAT_ID = int(os.environ["ALLOWED_CHAT_ID"])
+
+# id do GRUPO (número NEGATIVO, ex: -1001234567890). Opcional.
+# Se não definir, o bot só funciona no seu privado.
+_grp = os.environ.get("ALLOWED_GROUP_ID", "").strip()
+ALLOWED_GROUP_ID = int(_grp) if _grp else None
+
+# lista opcional de usuários liberados (ids separados por vírgula).
+# Vazio = qualquer um do grupo pode planilhar.
+ALLOWED_USER_IDS = {int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").split(",") if x.strip()}
+
+FIREBASE_UID = os.environ["FIREBASE_UID"]
+FIREBASE_CREDENTIALS_JSON = os.environ["FIREBASE_CREDENTIALS_JSON"]
+RENDER_EXTERNAL_URL = os.environ["RENDER_EXTERNAL_URL"]
+
+# para onde mandar as confirmações vindas do webapp (resolver apostas):
+# se tem grupo, avisa no grupo; senão, no seu privado.
+CHAT_NOTIFICACAO = ALLOWED_GROUP_ID if ALLOWED_GROUP_ID is not None else ALLOWED_CHAT_ID
 
 # inicializa Firebase Admin
 cred_dict = json.loads(FIREBASE_CREDENTIALS_JSON)
@@ -64,112 +90,165 @@ SPORTS = ['Futebol', 'Basquete', 'Tênis', 'MMA', 'Vôlei', 'E-sports', 'Outros'
 # estados da conversa
 AGUARDANDO_VALOR, AGUARDANDO_CASA, AGUARDANDO_DATA = range(3)
 
+# ══════════════════════════════════════════════════════════════════
+# CRIPTO → BRL — cotação em tempo real (CoinGecko, sem chave)
+# ══════════════════════════════════════════════════════════════════
+CRYPTO_IDS = {
+    "LTC": "litecoin",
+    "BTC": "bitcoin",
+    "ETH": "ethereum",
+    "USDT": "tether",
+}
+
+def obter_cotacao_brl(moeda: str) -> float | None:
+    """Busca a cotação atual de uma cripto em BRL. Retorna None se falhar."""
+    coingecko_id = CRYPTO_IDS.get((moeda or "").upper())
+    if not coingecko_id:
+        return None
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": coingecko_id, "vs_currencies": "brl"},
+            timeout=6,
+        )
+        r.raise_for_status()
+        return float(r.json()[coingecko_id]["brl"])
+    except Exception:
+        log.exception(f"Erro ao buscar cotação {moeda}/BRL")
+        return None
+
+def fmt_cripto(valor: float) -> str:
+    """Formata um valor cripto sem casas decimais desnecessárias (até 8 casas)."""
+    s = f"{float(valor):.8f}".rstrip("0").rstrip(".")
+    return s if s else "0"
 
 # ══════════════════════════════════════════════════════════════════
-# SEGURANÇA — só responde ao seu chat pessoal
+# SEGURANÇA — libera privado do dono + grupo autorizado
 # ══════════════════════════════════════════════════════════════════
+def chat_liberado(chat_id: int) -> bool:
+    if chat_id == ALLOWED_CHAT_ID:
+        return True
+    return ALLOWED_GROUP_ID is not None and chat_id == ALLOWED_GROUP_ID
+
 def autorizado(update: Update) -> bool:
-    return update.effective_chat.id == ALLOWED_CHAT_ID
+    chat = update.effective_chat
+    user = update.effective_user
+    if chat is None or not chat_liberado(chat.id):
+        return False
+    # se houver lista de liberados, o usuário precisa estar nela
+    if ALLOWED_USER_IDS and (user is None or user.id not in ALLOWED_USER_IDS):
+        return False
+    return True
 
+def nome_autor(update: Update) -> tuple[str, int]:
+    u = update.effective_user
+    if u is None:
+        return ("desconhecido", 0)
+    nome = u.username or u.full_name or str(u.id)
+    return (nome, u.id)
 
 # ══════════════════════════════════════════════════════════════════
-# LEITURA DO PRINT VIA GEMINI (visão, gratuito)
+# LEITURA DO PRINT VIA IA (visão) — devolve LISTA de seleções + tipo + moeda
 # ══════════════════════════════════════════════════════════════════
+def _extrair_json(text: str):
+    """Extrai o primeiro objeto JSON do texto, aguentando chaves aninhadas."""
+    text = (text or "").strip().replace("```json", "").replace("```", "").strip()
+    i, j = text.find("{"), text.rfind("}")
+    if i != -1 and j != -1 and j > i:
+        text = text[i:j + 1]
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        import ast
+        try:
+            return ast.literal_eval(text)
+        except Exception:
+            return None
+
 def extrair_dados_print(image_bytes: bytes, media_type: str) -> dict:
-    """Manda o print pro Gemini 2.5 Flash via OpenRouter e extrai os dados."""
-
+    """Manda o print pra IA e devolve {esporte, tipo, moeda, odd_total, selecoes:[...]}."""
     img_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
 
-    prompt = f"""Analise esta imagem que pode ser um bilhete de aposta ou uma dica/tip de aposta esportiva e extraia os dados principais.
+    prompt = f"""Analise este print de aposta esportiva e devolva TODAS as seleções.
 
-Mesmo que seja uma mensagem de grupo ou tip (não um bilhete oficial), tente identificar:
-- O esporte (futebol, basquete, etc)
-- O jogo/mercado/seleção (times, mercado apostado)
-- A odd (cotação, pode estar como "1.85", ">> 2.30", "@ 2.30", etc)
+CLASSIFIQUE O TIPO da aposta:
+- Se CADA seleção tem a SUA PRÓPRIA caixa de valor/stake E o SEU PRÓPRIO
+  "Retorno Potencial", então são APOSTAS SIMPLES SEPARADAS (NÃO é múltipla).
+  Cada linha é independente.
+    - Se, além disso, forem o MESMO jogo + MESMO jogador/mercado, mudando só a
+      linha/handicap (ex: Mais de 1.5, Mais de 2.5, Mais de 3.5) -> tipo = "escada".
+    - Caso contrário -> tipo = "simples".
+- Se houver VÁRIAS seleções mas UMA ÚNICA caixa de valor e UM ÚNICO retorno total
+  no rodapé, é uma MÚLTIPLA (acumulada) -> tipo = "multipla" e a odd é a odd TOTAL.
+- Se houver só uma seleção -> tipo = "simples".
 
-Se houver múltiplas seleções, trate como UMA única aposta combinada usando a odd TOTAL.
+DETECTE A MOEDA da aposta pelo símbolo do valor apostado:
+- "R$" -> moeda = "BRL"
+- "Ł" -> moeda = "LTC" (Litecoin)
+- "₿" -> moeda = "BTC" (Bitcoin)
+- "Ξ" -> moeda = "ETH" (Ethereum)
+- "$" sozinho em casa de cripto (sem "R$") -> moeda = "USDT"
+- Se não conseguir identificar nenhum símbolo -> moeda = "BRL"
+A moeda vale pra aposta inteira (mesma carteira). Extraia o valor de stake
+SEMPRE no formato numérico original (ex: 0.34300000), sem converter nada.
 
-Responda APENAS com um único objeto JSON válido, sem nenhum texto antes ou depois:
+Para CADA seleção extraia:
+  descricao (jogo + mercado), odd, stake (valor apostado, no formato/moeda original, se visível), retorno (se visível, na moeda original).
+
+Responda APENAS com um único JSON válido, sem texto antes ou depois:
 {{
   "esporte": "um destes: {', '.join(SPORTS)}",
-  "jogo_ou_aposta": "descrição curta, ex: 'Atlético MG x Juventude - Atlético MG vence + Mais de 0.5 gols 1T'",
-  "odd": 2.30
+  "tipo": "simples | escada | multipla",
+  "moeda": "BRL | LTC | BTC | ETH | USDT",
+  "odd_total": null,
+  "selecoes": [
+    {{"descricao": "Vasco x Cruzeiro - Santiago Sosa - Faltas Mais de 1.5", "odd": 2.25, "stake": 1.50, "retorno": 3.37}}
+  ]
 }}
-
-Se realmente não conseguir identificar algum campo, use null. Seja tolerante com formatos não convencionais."""
+Use null quando não conseguir ler um campo. Seja tolerante com formatos diferentes."""
 
     resp = openrouter_client.chat.completions.create(
         model="google/gemini-2.5-flash",
         messages=[
-            {
-                "role": "system",
-                "content": "You are a JSON extraction assistant. Respond ONLY with valid JSON, no thinking, no explanation, no markdown."
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{img_b64}"}},
-                    {"type": "text", "text": prompt}
-                ]
-            }
+            {"role": "system", "content": "You are a JSON extraction assistant. Respond ONLY with valid JSON, no thinking, no explanation, no markdown."},
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{img_b64}"}},
+                {"type": "text", "text": prompt},
+            ]},
         ],
-        max_tokens=500,
+        max_tokens=900,
     )
 
+    vazio = {"esporte": None, "tipo": "simples", "moeda": "BRL", "odd_total": None, "selecoes": []}
     if not resp or not resp.choices:
-        return {"esporte": None, "jogo_ou_aposta": None, "odd": None}
+        return vazio
 
-    text = resp.choices[0].message.content or ""
-    text = text.strip()
-
-    import re as _re
-    json_match = _re.search(r'\{[^{}]*\}', text, _re.DOTALL)
-    if json_match:
-        text = json_match.group(0)
-    else:
-        text = text.replace("```json", "").replace("```", "").strip()
-
-    if not text:
-        return {"esporte": None, "jogo_ou_aposta": None, "odd": None}
-
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        import ast as _ast
-        try:
-            parsed = _ast.literal_eval(text)
-        except Exception:
-            return {"esporte": None, "jogo_ou_aposta": None, "odd": None}
-
-    if isinstance(parsed, list):
-        if not parsed:
-            return {"esporte": None, "jogo_ou_aposta": None, "odd": None}
-        primeiro = parsed[0]
-        if len(parsed) > 1:
-            descricoes = [item.get("jogo_ou_aposta", "") for item in parsed if isinstance(item, dict)]
-            primeiro["jogo_ou_aposta"] = " + ".join(d for d in descricoes if d)
-        parsed = primeiro
-
+    parsed = _extrair_json(resp.choices[0].message.content or "")
     if not isinstance(parsed, dict):
-        return {"esporte": None, "jogo_ou_aposta": None, "odd": None}
+        return vazio
 
+    parsed.setdefault("esporte", None)
+    parsed.setdefault("tipo", "simples")
+    parsed.setdefault("moeda", "BRL")
+    parsed.setdefault("odd_total", None)
+    parsed.setdefault("selecoes", [])
+    if not isinstance(parsed["selecoes"], list):
+        parsed["selecoes"] = []
+    if not parsed.get("moeda"):
+        parsed["moeda"] = "BRL"
+    parsed["moeda"] = str(parsed["moeda"]).upper()
     return parsed
 
-
 # ══════════════════════════════════════════════════════════════════
-# PARSING FLEXÍVEL DE DATA — aceita "hoje", "ontem", ou dd/mm[/aaaa]
+# PARSING FLEXÍVEL DE DATA
 # ══════════════════════════════════════════════════════════════════
-def parsear_data(texto: str) -> str | None:
-    """Retorna a data no formato YYYY-MM-DD, ou None se não conseguir entender."""
-    texto = texto.strip().lower()
+def parsear_data(texto: str):
+    texto = (texto or "").strip().lower()
     hoje = agora()
-
     if texto in ("hoje", "h"):
         return hoje.strftime("%Y-%m-%d")
     if texto in ("ontem", "o"):
         return (hoje - timedelta(days=1)).strftime("%Y-%m-%d")
-
-    # aceita dd/mm ou dd/mm/aaaa ou dd-mm ou dd-mm-aaaa
     for sep in ("/", "-"):
         if sep in texto:
             partes = texto.split(sep)
@@ -188,45 +267,46 @@ def parsear_data(texto: str) -> str | None:
                 return None
     return None
 
-
 # ══════════════════════════════════════════════════════════════════
-# FIRESTORE — grava a aposta no mesmo formato do dashboard
+# FIRESTORE
 # ══════════════════════════════════════════════════════════════════
-def gravar_aposta(esp: str, ap: str, odd: float, stake: float, casa: str, dat: str) -> str:
+def gravar_aposta(esp, ap, odd, stake, casa, dat, autor, autor_id, grupo=None, tipo="simples",
+                   moeda="BRL", stake_original=None, cotacao=None) -> str:
     bet = {
         "dat": dat,
         "esp": esp or "Outros",
         "casa": casa,
         "ap": ap,
         "odd": odd,
-        "stake": stake,
+        "stake": stake,  # SEMPRE em BRL — dashboard e P&L continuam sem mudar
         "res": "PENDENTE",
+        "autor": autor,
+        "autor_id": autor_id,
         "createdAt": firestore.SERVER_TIMESTAMP,
     }
+    if grupo:
+        bet["grupo"] = grupo
+        bet["tipo"] = tipo
+    if moeda and moeda != "BRL":
+        bet["moeda"] = moeda
+        bet["stake_original"] = stake_original
+        bet["cotacao"] = cotacao  # cotação BRL usada no momento do registro
     ref = db.collection("users").document(FIREBASE_UID).collection("bets").add(bet)
-    return ref[1].id  # retorna o ID gerado pelo Firestore
-
+    return ref[1].id
 
 def buscar_pendentes(apenas_hoje: bool = True):
-    """Retorna lista de (id, dados) das apostas pendentes, mais recentes primeiro.
-    Por padrão, filtra só as de hoje (mesma data local do servidor)."""
     bets_col = db.collection("users").document(FIREBASE_UID).collection("bets")
     docs = bets_col.where("res", "==", "PENDENTE").stream()
     pendentes = [(doc.id, doc.to_dict()) for doc in docs]
-
     if apenas_hoje:
         hoje = hoje_local()
         pendentes = [(bid, b) for bid, b in pendentes if b.get("dat") == hoje]
-
-    # ordena pela data da aposta, mais recente primeiro (fallback se não tiver "dat")
     pendentes.sort(key=lambda x: x[1].get("dat", ""), reverse=True)
     return pendentes
-
 
 def resolver_aposta(bet_id: str, resultado: str):
     bets_col = db.collection("users").document(FIREBASE_UID).collection("bets")
     bets_col.document(bet_id).update({"res": resultado})
-
 
 # ══════════════════════════════════════════════════════════════════
 # HANDLERS DO TELEGRAM
@@ -236,13 +316,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "🤖 SuperOdds Bot ativo!\n\n"
-        "Me manda o print do bilhete da aposta que eu cadastro automaticamente como pendente."
+        "Me manda o print do bilhete que eu cadastro como pendente.\n"
+        "Se for uma escada (mesma aposta em várias linhas), eu detecto e "
+        "cadastro cada linha separada automaticamente.\n"
+        "Também entendo apostas em cripto (Ł, ₿, Ξ) — converto pra R$ na "
+        "cotação do momento."
     )
-
 
 async def receber_print(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not autorizado(update):
-        return
+        return ConversationHandler.END
 
     await update.message.reply_text("🔎 Lendo o print...")
 
@@ -254,44 +337,135 @@ async def receber_print(update: Update, context: ContextTypes.DEFAULT_TYPE):
         dados = extrair_dados_print(bytes(image_bytes), "image/jpeg")
     except Exception as e:
         log.exception("Erro ao ler print")
-        await update.message.reply_text(f"⚠ Não consegui ler o print: {e}\nTenta de novo ou manda um print mais nítido.")
+        await update.message.reply_text(f"⚠ Não consegui ler o print: {e}\nTenta um print mais nítido.")
         return ConversationHandler.END
 
-    if not dados.get("odd") or not dados.get("jogo_ou_aposta"):
+    selecoes = [s for s in dados.get("selecoes", []) if isinstance(s, dict) and s.get("odd")]
+    if not selecoes:
         await update.message.reply_text(
-            "⚠ Não consegui identificar os dados com certeza nesse print.\n"
-            "Pode mandar um print mais nítido, mostrando claramente o jogo e a odd?"
+            "⚠ Não identifiquei os dados nesse print.\n"
+            "Manda um print mais nítido, mostrando o jogo e a odd."
         )
         return ConversationHandler.END
 
-    try:
-        odd_valor = float(dados["odd"])
-    except (TypeError, ValueError):
+    esp = dados.get("esporte") or "Outros"
+    tipo = (dados.get("tipo") or "simples").lower()
+    moeda = (dados.get("moeda") or "BRL").upper()
+    autor, autor_id = nome_autor(update)
+
+    context.user_data["esp"] = esp
+    context.user_data["autor"] = autor
+    context.user_data["autor_id"] = autor_id
+    context.user_data["moeda"] = moeda
+
+    # se for cripto, já busca a cotação agora — usa pra tudo que vier depois
+    cotacao = None
+    if moeda != "BRL":
+        cotacao = obter_cotacao_brl(moeda)
+        if cotacao is None:
+            await update.message.reply_text(
+                f"⚠ Identifiquei uma aposta em {moeda}, mas não consegui buscar a "
+                f"cotação agora. Tenta reenviar o print em instantes."
+            )
+            return ConversationHandler.END
+        context.user_data["cotacao"] = cotacao
+
+    escada = tipo in ("escada", "simples") and len(selecoes) >= 2
+    todas_tem_stake = all(s.get("stake") not in (None, "", 0) for s in selecoes)
+
+    # ---- CAMINHO 1: escada / várias simples com valores no print ----
+    if escada and todas_tem_stake:
+        context.user_data["modo"] = "grupo"
+        context.user_data["tipo"] = tipo
+
+        # converte cada linha pra BRL se for cripto, mantendo o valor original
+        for s in selecoes:
+            s["stake"] = float(s["stake"])
+            s["stake_brl"] = round(s["stake"] * cotacao, 2) if moeda != "BRL" else s["stake"]
+        context.user_data["selecoes"] = selecoes
+
+        if moeda != "BRL":
+            linhas = "\n".join(
+                f"• {s['descricao']} @{s['odd']} — {fmt_cripto(s['stake'])} {moeda} (≈ R$ {s['stake_brl']:.2f})"
+                for s in selecoes
+            )
+            total_nativo = sum(s["stake"] for s in selecoes)
+            total_brl = sum(s["stake_brl"] for s in selecoes)
+            rodape = (f"💱 Cotação usada: R$ {cotacao:.2f} / {moeda}\n"
+                      f"Total: {fmt_cripto(total_nativo)} {moeda} ≈ R$ {total_brl:.2f}")
+        else:
+            linhas = "\n".join(
+                f"• {s['descricao']} @{s['odd']} — R$ {s['stake']:.2f}" for s in selecoes
+            )
+            total = sum(s["stake"] for s in selecoes)
+            rodape = f"Stake total: R$ {total:.2f}"
+
         await update.message.reply_text(
-            "⚠ Não consegui identificar a odd com certeza.\n"
-            "Pode mandar um print mais nítido?"
+            f"🪜 Identifiquei uma *{tipo}* com {len(selecoes)} linhas:\n\n"
+            f"{linhas}\n\n{rodape}\n\n🏦 Em qual casa de apostas?",
+            parse_mode="Markdown",
+        )
+        return AGUARDANDO_CASA
+
+    # ---- caso escada mas sem os valores por linha: não dá pra inferir ----
+    if escada and not todas_tem_stake:
+        await update.message.reply_text(
+            "🪜 Parece uma escada (mesma aposta em várias linhas), mas não "
+            "consegui ler o valor de CADA linha.\n"
+            "Manda um print onde apareça o valor apostado em cada seleção."
         )
         return ConversationHandler.END
 
-    context.user_data["esp"] = dados.get("esporte") or "Outros"
-    context.user_data["ap"] = dados["jogo_ou_aposta"]
-    context.user_data["odd"] = odd_valor
+    # ---- CAMINHO 2: aposta única (simples de 1 linha ou múltipla) ----
+    context.user_data["modo"] = "unico"
+    if tipo == "multipla" and len(selecoes) >= 2:
+        odd = dados.get("odd_total") or round(prod(float(s["odd"]) for s in selecoes), 2)
+        ap = " + ".join(s["descricao"] for s in selecoes)
+        context.user_data["tipo"] = "multipla"
+    else:
+        odd = float(selecoes[0]["odd"])
+        ap = selecoes[0]["descricao"]
+        context.user_data["tipo"] = "simples"
 
-    resumo = (
+    context.user_data["ap"] = ap
+    context.user_data["odd"] = float(odd)
+
+    stake_no_print = selecoes[0].get("stake")
+    resumo_base = (
         f"✅ Identifiquei:\n\n"
-        f"🏅 Esporte: {context.user_data['esp']}\n"
-        f"🎯 Aposta: {context.user_data['ap']}\n"
-        f"📈 Odd: {context.user_data['odd']}\n\n"
-        f"💰 Quanto você apostou? (só o número, ex: 50)"
+        f"🏅 Esporte: {esp}\n"
+        f"🎯 Aposta: {ap}\n"
+        f"📈 Odd: {context.user_data['odd']}\n"
     )
-    await update.message.reply_text(resumo)
-    return AGUARDANDO_VALOR
 
+    if stake_no_print not in (None, "", 0):
+        # o valor já veio no print — não precisa perguntar
+        stake_original = float(stake_no_print)
+        if moeda != "BRL":
+            stake_brl = round(stake_original * cotacao, 2)
+            context.user_data["stake"] = stake_brl
+            context.user_data["stake_original"] = stake_original
+            resumo_base += (
+                f"💰 Valor: {fmt_cripto(stake_original)} {moeda} ≈ R$ {stake_brl:.2f} "
+                f"(cotação R$ {cotacao:.2f})\n"
+            )
+        else:
+            context.user_data["stake"] = stake_original
+            resumo_base += f"💰 Valor: R$ {stake_original:.2f}\n"
+        await update.message.reply_text(resumo_base + "\n🏦 Em qual casa de apostas?")
+        return AGUARDANDO_CASA
+
+    # valor não veio no print — pergunta, já na moeda certa
+    if moeda != "BRL":
+        resumo_base += f"\n💰 Quanto você apostou? (em {moeda}, ex: 0.05)"
+    else:
+        resumo_base += "\n💰 Quanto você apostou? (só o número, ex: 50)"
+    await update.message.reply_text(resumo_base)
+    return AGUARDANDO_VALOR
 
 async def receber_valor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not autorizado(update):
         return ConversationHandler.END
-
     texto = update.message.text.strip().replace(",", ".").replace("R$", "").strip()
     try:
         valor = float(texto)
@@ -299,131 +473,166 @@ async def receber_valor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠ Manda só o número, ex: 50 ou 50.00")
         return AGUARDANDO_VALOR
 
-    context.user_data["stake"] = valor
-    await update.message.reply_text("🏦 Em qual casa de apostas?")
+    moeda = context.user_data.get("moeda", "BRL")
+    if moeda != "BRL":
+        cotacao = context.user_data.get("cotacao") or obter_cotacao_brl(moeda)
+        if cotacao is None:
+            await update.message.reply_text(
+                f"⚠ Não consegui buscar a cotação de {moeda} agora. Tenta de novo em instantes."
+            )
+            return ConversationHandler.END
+        context.user_data["cotacao"] = cotacao
+        stake_brl = round(valor * cotacao, 2)
+        context.user_data["stake"] = stake_brl
+        context.user_data["stake_original"] = valor
+        await update.message.reply_text(
+            f"💱 {fmt_cripto(valor)} {moeda} ≈ R$ {stake_brl:.2f} (cotação R$ {cotacao:.2f})\n\n"
+            f"🏦 Em qual casa de apostas?"
+        )
+    else:
+        context.user_data["stake"] = valor
+        await update.message.reply_text("🏦 Em qual casa de apostas?")
     return AGUARDANDO_CASA
-
 
 async def receber_casa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not autorizado(update):
         return ConversationHandler.END
-
     context.user_data["casa"] = update.message.text.strip()
-
     hoje_fmt = agora().strftime("%d/%m")
     await update.message.reply_text(
-        f"📅 Qual o dia da aposta?\n"
-        f"Manda 'hoje', 'ontem', ou a data (ex: {hoje_fmt})"
+        f"📅 Qual o dia da aposta?\nManda 'hoje', 'ontem', ou a data (ex: {hoje_fmt})"
     )
     return AGUARDANDO_DATA
-
 
 async def receber_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not autorizado(update):
         return ConversationHandler.END
-
     dat = parsear_data(update.message.text)
     if not dat:
         await update.message.reply_text(
-            "⚠ Não entendi essa data. Manda 'hoje', 'ontem', ou no formato dd/mm (ex: 17/06)"
+            "⚠ Não entendi a data. Manda 'hoje', 'ontem', ou dd/mm (ex: 17/06)"
         )
         return AGUARDANDO_DATA
 
     d = context.user_data
     d["dat"] = dat
+    data_fmt = datetime.strptime(dat, "%Y-%m-%d").strftime("%d/%m/%Y")
+    moeda = d.get("moeda", "BRL")
 
     try:
-        bet_id = gravar_aposta(d["esp"], d["ap"], d["odd"], d["stake"], d["casa"], d["dat"])
+        if d.get("modo") == "grupo":
+            # ESCADA: cada linha vira uma aposta, todas com o mesmo grupo
+            grupo = str(uuid.uuid4())[:8]
+            linhas_txt = []
+            for s in d["selecoes"]:
+                gravar_aposta(
+                    d["esp"], s["descricao"], float(s["odd"]), float(s["stake_brl"]),
+                    d["casa"], dat, d["autor"], d["autor_id"],
+                    grupo=grupo, tipo=d["tipo"],
+                    moeda=moeda,
+                    stake_original=float(s["stake"]) if moeda != "BRL" else None,
+                    cotacao=d.get("cotacao") if moeda != "BRL" else None,
+                )
+                if moeda != "BRL":
+                    linhas_txt.append(
+                        f"• {s['descricao']} @{s['odd']} — {fmt_cripto(s['stake'])} {moeda} (R$ {s['stake_brl']:.2f})"
+                    )
+                else:
+                    linhas_txt.append(f"• {s['descricao']} @{s['odd']} — R$ {s['stake_brl']:.2f}")
+
+            total_brl = sum(s["stake_brl"] for s in d["selecoes"])
+            rodape = f"💰 Stake total: R$ {total_brl:.2f}"
+            if moeda != "BRL":
+                total_nativo = sum(s["stake"] for s in d["selecoes"])
+                rodape = (f"💰 Stake total: {fmt_cripto(total_nativo)} {moeda} "
+                          f"≈ R$ {total_brl:.2f} (cotação R$ {d['cotacao']:.2f})")
+
+            await update.message.reply_text(
+                f"🎉 Escada cadastrada ({len(d['selecoes'])} linhas) como PENDENTE!\n\n"
+                + "\n".join(linhas_txt)
+                + f"\n\n{rodape}\n🏦 {d['casa']}\n📅 {data_fmt}\n👤 {d['autor']}\n\n"
+                f"Resolve cada linha no dashboard (elas ganham/perdem separadas)."
+            )
+        else:
+            # aposta única (simples/múltipla)
+            bet_id = gravar_aposta(
+                d["esp"], d["ap"], d["odd"], d["stake"], d["casa"], dat,
+                d["autor"], d["autor_id"], tipo=d.get("tipo", "simples"),
+                moeda=moeda,
+                stake_original=d.get("stake_original") if moeda != "BRL" else None,
+                cotacao=d.get("cotacao") if moeda != "BRL" else None,
+            )
+            valor_linha = f"💰 R$ {d['stake']:.2f}"
+            if moeda != "BRL":
+                valor_linha = (f"💰 {fmt_cripto(d['stake_original'])} {moeda} "
+                               f"≈ R$ {d['stake']:.2f} (cotação R$ {d['cotacao']:.2f})")
+            botao = [[InlineKeyboardButton("✏️ Editar aposta", callback_data=f"editar|{bet_id}")]]
+            await update.message.reply_text(
+                f"🎉 Aposta cadastrada como PENDENTE!\n\n"
+                f"🏅 {d['esp']}\n🎯 {d['ap']}\n📈 Odd {d['odd']}\n"
+                f"{valor_linha}\n🏦 {d['casa']}\n📅 {data_fmt}\n👤 {d['autor']}\n\n"
+                f"Resolve ela (Green/Red/Void) no dashboard.",
+                reply_markup=InlineKeyboardMarkup(botao),
+            )
     except Exception as e:
         log.exception("Erro ao gravar no Firestore")
         await update.message.reply_text(f"⚠ Erro ao salvar no dashboard: {e}")
         return ConversationHandler.END
 
-    data_fmt = datetime.strptime(dat, "%Y-%m-%d").strftime("%d/%m/%Y")
-    botao = [[InlineKeyboardButton("✏️ Editar aposta", callback_data=f"editar|{bet_id}")]]
-    await update.message.reply_text(
-        f"🎉 Aposta cadastrada como PENDENTE!\n\n"
-        f"🏅 {d['esp']}\n🎯 {d['ap']}\n📈 Odd {d['odd']}\n"
-        f"💰 R$ {d['stake']:.2f}\n🏦 {d['casa']}\n📅 {data_fmt}\n\n"
-        f"Resolve ela (Green/Red/Void) direto no dashboard quando o jogo acabar.",
-        reply_markup=InlineKeyboardMarkup(botao),
-    )
     context.user_data.clear()
     return ConversationHandler.END
 
+async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not autorizado(update):
+        return ConversationHandler.END
+    context.user_data.clear()
+    await update.message.reply_text("Cadastro cancelado.")
+    return ConversationHandler.END
 
 # ══════════════════════════════════════════════════════════════════
-# EDITAR APOSTA VIA BOT
+# EDITAR APOSTA (só no privado — no grupo, edite pelo dashboard)
 # ══════════════════════════════════════════════════════════════════
-AGUARDANDO_CAMPO, AGUARDANDO_NOVO_VALOR = range(10, 12)
-
 CAMPOS_EDITAVEIS = {
-    "esp": "🏅 Esporte",
-    "ap": "🎯 Aposta",
-    "odd": "📈 Odd",
-    "stake": "💰 Valor (R$)",
-    "casa": "🏦 Casa",
-    "dat": "📅 Data",
+    "esp": "🏅 Esporte", "ap": "🎯 Aposta", "odd": "📈 Odd",
+    "stake": "💰 Valor (R$)", "casa": "🏦 Casa", "dat": "📅 Data",
 }
 
 async def callback_editar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Abre o menu de edição ao clicar no botão ✏️"""
     query = update.callback_query
-    if query.message.chat.id != ALLOWED_CHAT_ID:
+    if not chat_liberado(query.message.chat.id):
         return
     await query.answer()
-
     _, bet_id = query.data.split("|", 1)
     context.user_data["edit_bet_id"] = bet_id
-
     botoes = [[InlineKeyboardButton(label, callback_data=f"campo|{campo}")]
               for campo, label in CAMPOS_EDITAVEIS.items()]
     botoes.append([InlineKeyboardButton("❌ Cancelar", callback_data="campo|cancelar")])
-
     await query.edit_message_reply_markup(reply_markup=None)
-    await query.message.reply_text(
-        "✏️ O que você quer editar?",
-        reply_markup=InlineKeyboardMarkup(botoes),
-    )
-
+    await query.message.reply_text("✏️ O que você quer editar?", reply_markup=InlineKeyboardMarkup(botoes))
 
 async def callback_campo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Recebe qual campo editar e pede o novo valor."""
     query = update.callback_query
-    if query.message.chat.id != ALLOWED_CHAT_ID:
+    if not chat_liberado(query.message.chat.id):
         return
     await query.answer()
-
     campo = query.data.split("|", 1)[1]
-
     if campo == "cancelar":
         await query.edit_message_text("Edição cancelada.")
         context.user_data.pop("edit_bet_id", None)
         return
-
     context.user_data["edit_campo"] = campo
     label = CAMPOS_EDITAVEIS.get(campo, campo)
-
     await query.edit_message_text(f"✏️ Novo valor para *{label}*:", parse_mode="Markdown")
-    return
 
-
-async def receber_novo_valor(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Recebe o novo valor e atualiza no Firestore."""
-    if not autorizado(update):
-        return
-    if "edit_bet_id" not in context.user_data or "edit_campo" not in context.user_data:
-        return
-
+async def _aplicar_edicao(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bet_id = context.user_data.pop("edit_bet_id")
     campo = context.user_data.pop("edit_campo")
     novo = update.message.text.strip()
-
-    # converte tipos
     try:
         if campo == "odd":
             novo = float(novo.replace(",", "."))
         elif campo == "stake":
+            # edição de stake é sempre em R$ direto (valor já congelado no dashboard)
             novo = float(novo.replace(",", ".").replace("R$", "").strip())
         elif campo == "dat":
             novo = parsear_data(novo)
@@ -433,38 +642,31 @@ async def receber_novo_valor(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except ValueError:
         await update.message.reply_text("⚠ Valor inválido. Tenta de novo.")
         return
-
     try:
         bets_col = db.collection("users").document(FIREBASE_UID).collection("bets")
         bets_col.document(bet_id).update({campo: novo})
-        label = CAMPOS_EDITAVEIS.get(campo, campo)
-        await update.message.reply_text(f"✅ *{label}* atualizado!", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ *{CAMPOS_EDITAVEIS.get(campo, campo)}* atualizado!", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"⚠ Erro ao atualizar: {e}")
 
-
-async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not autorizado(update):
-        return ConversationHandler.END
-    context.user_data.clear()
-    await update.message.reply_text("Cadastro cancelado.")
-    return ConversationHandler.END
-
-
-async def mensagem_nao_reconhecida(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def texto_avulso(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Texto solto FORA de conversa. Só age no privado, pra não poluir o grupo."""
     if not autorizado(update):
         return
-    await update.message.reply_text("Me manda um print do bilhete da aposta pra eu cadastrar! 📸")
-
+    if update.effective_chat.type != "private":
+        return
+    if "edit_bet_id" in context.user_data and "edit_campo" in context.user_data:
+        await _aplicar_edicao(update, context)
+        return
+    await update.message.reply_text("Me manda um print do bilhete pra eu cadastrar! 📸")
 
 # ══════════════════════════════════════════════════════════════════
-# RESOLVER PENDENTES POR TEXTO — "green", "red" ou "void"
+# RESOLVER PENDENTES (Mini App)
 # ══════════════════════════════════════════════════════════════════
 EMOJI_ESPORTE = {
     "Futebol": "⚽", "Basquete": "🏀", "Tênis": "🎾",
     "MMA": "🥊", "Vôlei": "🏐", "E-sports": "🎮", "Outros": "🎲",
 }
-
 
 def formatar_resumo_aposta(b: dict, max_ap: int = 28) -> str:
     emoji = EMOJI_ESPORTE.get(b.get("esp"), "🎲")
@@ -476,9 +678,7 @@ def formatar_resumo_aposta(b: dict, max_ap: int = 28) -> str:
     casa_str = f" {casa}" if casa else ""
     return f"{emoji} {ap}{casa_str} @{odd}"
 
-
 async def cmd_resolver(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Abre o Mini App para resolver apostas pendentes de hoje."""
     if not autorizado(update):
         return
     pendentes = buscar_pendentes()
@@ -488,81 +688,53 @@ async def cmd_resolver(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     from telegram import WebAppInfo
     webapp_url = f"{RENDER_EXTERNAL_URL}/webapp?token={TELEGRAM_TOKEN}"
-    botao = [[InlineKeyboardButton(
-        f"⚡ Resolver apostas ({n} hoje)",
-        web_app=WebAppInfo(url=webapp_url)
-    )]]
+    botao = [[InlineKeyboardButton(f"⚡ Resolver apostas ({n} hoje)", web_app=WebAppInfo(url=webapp_url))]]
     await update.message.reply_text(
         f"📋 *{n} aposta{'s' if n!=1 else ''} pendente{'s' if n!=1 else ''} hoje*\nAbra o menu para resolver:",
         reply_markup=InlineKeyboardMarkup(botao),
         parse_mode="Markdown",
     )
 
-
 async def cmd_resumo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Abre o Mini App visual de resumo do dia."""
     if not autorizado(update):
         return
     from telegram import WebAppInfo
     webapp_url = f"{RENDER_EXTERNAL_URL}/dia-app"
-    botao = [[InlineKeyboardButton(
-        "📊 Ver resumo do dia",
-        web_app=WebAppInfo(url=webapp_url)
-    )]]
-    await update.message.reply_text(
-        "📊 *Resumo do dia*",
-        reply_markup=InlineKeyboardMarkup(botao),
-        parse_mode="Markdown",
-    )
-
+    botao = [[InlineKeyboardButton("📊 Ver resumo do dia", web_app=WebAppInfo(url=webapp_url))]]
+    await update.message.reply_text("📊 *Resumo do dia*", reply_markup=InlineKeyboardMarkup(botao), parse_mode="Markdown")
 
 async def callback_resolver(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Disparado quando o usuário clica num dos botões de aposta pendente."""
     query = update.callback_query
-    if query.message.chat.id != ALLOWED_CHAT_ID:
+    if not chat_liberado(query.message.chat.id):
         return
-
     await query.answer()
-
     _, resultado, bet_id = query.data.split("|")
-
     bets_col = db.collection("users").document(FIREBASE_UID).collection("bets")
     doc = bets_col.document(bet_id).get()
     b = doc.to_dict() if doc.exists else {}
-
     try:
         resolver_aposta(bet_id, resultado)
     except Exception as e:
         log.exception("Erro ao resolver aposta")
         await query.edit_message_text(f"⚠ Erro ao marcar a aposta: {e}")
         return
-
     cor = {"GREEN": "🟢", "RED": "🔴", "VOID": "⚪"}.get(resultado, "")
     resumo = formatar_resumo_aposta(b) if b else ""
-
     texto = f"{cor} *{resultado}*\n{resumo}" if resumo else f"{cor} Aposta marcada como {resultado}!"
-
-    # calcula o retorno/lucro pra mostrar na confirmação, quando possível
     try:
-        stake = float(b.get("stake", 0))
-        odd = float(b.get("odd", 0))
+        stake = float(b.get("stake", 0)); odd = float(b.get("odd", 0))
         if resultado == "GREEN":
-            lucro = stake * (odd - 1)
-            texto += f"\n💰 Lucro: +R$ {lucro:.2f}"
+            texto += f"\n💰 Lucro: +R$ {stake * (odd - 1):.2f}"
         elif resultado == "RED":
             texto += f"\n💸 Prejuízo: -R$ {stake:.2f}"
         elif resultado == "VOID":
             texto += f"\n↩️ Stake devolvida: R$ {stake:.2f}"
     except (TypeError, ValueError):
         pass
-
     await query.edit_message_text(texto, parse_mode="Markdown")
 
-
 # ══════════════════════════════════════════════════════════════════
-# MAIN — servidor webhook manual com aiohttp (evita o start_webhook()
-# interno da biblioteca, que tem um bug de incompatibilidade com
-# versões recentes do Python no ambiente do Render)
+# MAIN — servidor webhook com aiohttp
 # ══════════════════════════════════════════════════════════════════
 async def run_bot():
     from aiohttp import web
@@ -577,6 +749,8 @@ async def run_bot():
             AGUARDANDO_DATA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data)],
         },
         fallbacks=[CommandHandler("cancelar", cancelar)],
+        # per_user/per_chat True por padrão -> no grupo, cada pessoa tem
+        # a sua própria conversa em paralelo, sem misturar.
     )
 
     app.add_handler(CommandHandler("start", start))
@@ -586,11 +760,11 @@ async def run_bot():
     app.add_handler(CallbackQueryHandler(callback_resolver, pattern=r"^resolve\|"))
     app.add_handler(CallbackQueryHandler(callback_editar, pattern=r"^editar\|"))
     app.add_handler(CallbackQueryHandler(callback_campo, pattern=r"^campo\|"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receber_novo_valor))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, mensagem_nao_reconhecida))
+    # texto solto só no privado (edição / mensagem não reconhecida)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, texto_avulso))
 
     port = int(os.environ.get("PORT", 10000))
-    webhook_path = "/" + TELEGRAM_TOKEN  # usa o próprio token como "segredo" da URL
+    webhook_path = "/" + TELEGRAM_TOKEN
     webhook_url = f"{RENDER_EXTERNAL_URL}{webhook_path}"
 
     async def handle_webhook(request: web.Request) -> web.Response:
@@ -603,17 +777,13 @@ async def run_bot():
         return web.Response(text="SuperOdds Bot rodando!")
 
     async def handle_webapp(request: web.Request) -> web.Response:
-        """Serve o HTML do Mini App."""
         import os as _os
         html_path = _os.path.join(_os.path.dirname(__file__), "webapp.html")
         with open(html_path, "r", encoding="utf-8") as f:
             html = f.read()
-        return web.Response(text=html, content_type="text/html", headers={
-            "Access-Control-Allow-Origin": "*",
-        })
+        return web.Response(text=html, content_type="text/html", headers={"Access-Control-Allow-Origin": "*"})
 
     async def handle_pendentes(request: web.Request) -> web.Response:
-        """API: retorna apostas pendentes de hoje em JSON."""
         if request.rel_url.query.get("token") != TELEGRAM_TOKEN:
             return web.Response(status=403, text="Forbidden")
         hoje = hoje_local()
@@ -624,14 +794,12 @@ async def run_bot():
             d = doc.to_dict()
             if d.get("dat") == hoje:
                 d["id"] = doc.id
-                # remove campos não serializáveis (como SERVER_TIMESTAMP)
                 d.pop("createdAt", None)
                 pendentes.append(d)
         pendentes.sort(key=lambda x: x.get("dat", ""), reverse=True)
         return web.json_response(pendentes, headers={"Access-Control-Allow-Origin": "*"})
 
     async def handle_resolve(request: web.Request) -> web.Response:
-        """API: resolve uma aposta e retorna o resultado com lucro/prejuízo."""
         if request.rel_url.query.get("token") != TELEGRAM_TOKEN:
             return web.Response(status=403, text="Forbidden")
         bet_id = request.rel_url.query.get("bet_id")
@@ -642,83 +810,35 @@ async def run_bot():
         doc = bets_col.document(bet_id).get()
         b = doc.to_dict() if doc.exists else {}
         resolver_aposta(bet_id, resultado)
-        # monta mensagem de confirmação para o chat
         cor = {"GREEN": "🟢", "RED": "🔴", "VOID": "⚪"}.get(resultado, "")
         resumo = formatar_resumo_aposta(b) if b else ""
         msg = f"{cor} *{resultado}*\n{resumo}" if resumo else f"{cor} Aposta marcada como {resultado}!"
         try:
-            stake = float(b.get("stake", 0))
-            odd = float(b.get("odd", 0))
+            stake = float(b.get("stake", 0)); odd = float(b.get("odd", 0))
             if resultado == "GREEN":
-                lucro = stake * (odd - 1)
-                msg += f"\n💰 Lucro: +R$ {lucro:.2f}"
+                msg += f"\n💰 Lucro: +R$ {stake * (odd - 1):.2f}"
             elif resultado == "RED":
                 msg += f"\n💸 Prejuízo: -R$ {stake:.2f}"
             elif resultado == "VOID":
                 msg += f"\n↩️ Stake devolvida: R$ {stake:.2f}"
         except (TypeError, ValueError):
             pass
-        # envia confirmação no chat do Telegram
         try:
-            await app.bot.send_message(ALLOWED_CHAT_ID, msg, parse_mode="Markdown")
+            await app.bot.send_message(CHAT_NOTIFICACAO, msg, parse_mode="Markdown")
         except Exception:
             pass
-        return web.json_response({"ok": True, "msg": f"{cor} {resultado}!"}, headers={
-            "Access-Control-Allow-Origin": "*",
-        })
-
-    async def handle_resolve_multi(request: web.Request) -> web.Response:
-        """API: resolve múltiplas apostas de uma vez."""
-        if request.rel_url.query.get("token") != TELEGRAM_TOKEN:
-            return web.Response(status=403, text="Forbidden")
-        ids_str = request.rel_url.query.get("ids", "")
-        resultado = request.rel_url.query.get("res", "").upper()
-        if not ids_str or resultado not in ("GREEN", "RED", "VOID"):
-            return web.Response(status=400, text="Parâmetros inválidos")
-        ids = [i.strip() for i in ids_str.split(",") if i.strip()]
-        bets_col = db.collection("users").document(FIREBASE_UID).collection("bets")
-        total_lucro = 0.0
-        cor = {"GREEN": "🟢", "RED": "🔴", "VOID": "⚪"}.get(resultado, "")
-        for bet_id in ids:
-            doc = bets_col.document(bet_id).get()
-            b = doc.to_dict() if doc.exists else {}
-            resolver_aposta(bet_id, resultado)
-            try:
-                stake = float(b.get("stake", 0))
-                odd = float(b.get("odd", 0))
-                if resultado == "GREEN": total_lucro += stake * (odd - 1)
-                elif resultado == "RED": total_lucro -= stake
-            except (TypeError, ValueError):
-                pass
-        # monta mensagem de confirmação
-        n = len(ids)
-        if resultado == "GREEN":
-            msg = f"🟢 *{n} aposta{'s' if n>1 else ''} marcada{'s' if n>1 else ''} como GREEN*\n💰 Lucro total: +R$ {total_lucro:.2f}"
-        elif resultado == "RED":
-            msg = f"🔴 *{n} aposta{'s' if n>1 else ''} marcada{'s' if n>1 else ''} como RED*\n💸 Prejuízo total: -R$ {abs(total_lucro):.2f}"
-        else:
-            msg = f"⚪ *{n} aposta{'s' if n>1 else ''} marcada{'s' if n>1 else ''} como VOID*\n↩️ Stakes devolvidas"
-        try:
-            await app.bot.send_message(ALLOWED_CHAT_ID, msg, parse_mode="Markdown")
-        except Exception:
-            pass
-        return web.json_response({"ok": True, "msg": f"{cor} {n} apostas salvas!"}, headers={
-            "Access-Control-Allow-Origin": "*",
-        })
+        return web.json_response({"ok": True, "msg": f"{cor} {resultado}!"}, headers={"Access-Control-Allow-Origin": "*"})
 
     async def handle_resolve_multi_v2(request: web.Request) -> web.Response:
-        """API: resolve apostas com resultados individuais. Body: {bet_id: resultado}"""
         if request.rel_url.query.get("token") != TELEGRAM_TOKEN:
             return web.Response(status=403, text="Forbidden")
         try:
             data = await request.json()
         except Exception:
             return web.Response(status=400, text="JSON inválido")
-
         bets_col = db.collection("users").document(FIREBASE_UID).collection("bets")
         green_lucro = red_lucro = 0.0
         green_n = red_n = void_n = 0
-
         for bet_id, resultado in data.items():
             if resultado not in ("GREEN", "RED", "VOID"):
                 continue
@@ -726,48 +846,38 @@ async def run_bot():
             b = doc.to_dict() if doc.exists else {}
             bets_col.document(bet_id).update({"res": resultado})
             try:
-                stake = float(b.get("stake", 0) or 0)
-                odd = float(b.get("odd", 0) or 0)
+                stake = float(b.get("stake", 0) or 0); odd = float(b.get("odd", 0) or 0)
                 if resultado == "GREEN":
-                    green_lucro += stake * (odd - 1)
-                    green_n += 1
+                    green_lucro += stake * (odd - 1); green_n += 1
                 elif resultado == "RED":
-                    red_lucro -= stake
-                    red_n += 1
+                    red_lucro -= stake; red_n += 1
                 elif resultado == "VOID":
                     void_n += 1
             except (TypeError, ValueError):
                 pass
-
-        # monta mensagem de confirmação
         linhas = ["✅ *Apostas resolvidas!*"]
         if green_n: linhas.append(f"🟢 {green_n} GREEN · Lucro: +R$ {green_lucro:.2f}")
-        if red_n:   linhas.append(f"🔴 {red_n} RED · Prejuízo: -R$ {abs(red_lucro):.2f}")
-        if void_n:  linhas.append(f"⚪ {void_n} VOID")
+        if red_n: linhas.append(f"🔴 {red_n} RED · Prejuízo: -R$ {abs(red_lucro):.2f}")
+        if void_n: linhas.append(f"⚪ {void_n} VOID")
         total = green_lucro + red_lucro
         if green_n or red_n:
             sinal = "+" if total >= 0 else ""
             linhas.append(f"\n💰 Resultado líquido: *{sinal}R$ {total:.2f}*")
-
-        msg = "\n".join(linhas)
         try:
-            await app.bot.send_message(ALLOWED_CHAT_ID, msg, parse_mode="Markdown")
+            await app.bot.send_message(CHAT_NOTIFICACAO, "\n".join(linhas), parse_mode="Markdown")
         except Exception:
             pass
         return web.json_response(
             {"ok": True, "msg": f"✅ {green_n+red_n+void_n} apostas salvas!"},
-            headers={"Access-Control-Allow-Origin": "*"}
+            headers={"Access-Control-Allow-Origin": "*"},
         )
 
     async def handle_dia_app(request: web.Request) -> web.Response:
-        """Serve o HTML do resumo diário como Mini App."""
         import os as _os
         html_path = _os.path.join(_os.path.dirname(__file__), "resumo.html")
         with open(html_path, "r", encoding="utf-8") as f:
             html = f.read()
-        return web.Response(text=html, content_type="text/html", headers={
-            "Access-Control-Allow-Origin": "*",
-        })
+        return web.Response(text=html, content_type="text/html", headers={"Access-Control-Allow-Origin": "*"})
 
     web_app = web.Application()
     web_app.router.add_post(webhook_path, handle_webhook)
@@ -776,24 +886,19 @@ async def run_bot():
     web_app.router.add_get("/dia-app", handle_dia_app)
     web_app.router.add_get("/pendentes", handle_pendentes)
     web_app.router.add_get("/resolve", handle_resolve)
-    web_app.router.add_get("/resolve-multi", handle_resolve_multi)
     web_app.router.add_post("/resolve-multi-v2", handle_resolve_multi_v2)
 
     runner = web.AppRunner(web_app)
-
     async with app:
         await app.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
         await app.start()
-
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", port)
         await site.start()
-
         log.info(f"Bot iniciado via webhook em {webhook_url}")
-
         import asyncio
         try:
-            await asyncio.Event().wait()  # mantém o processo rodando pra sempre
+            await asyncio.Event().wait()
         finally:
             await runner.cleanup()
             await app.stop()
